@@ -26,8 +26,9 @@ final class SelectTextTests: XCTestCase {
         let hub = ProcessInfo.processInfo.environment["PERSONA_MOCK_HUB"]!
         app = XCUIApplication()
         let pair = "persona://pair?url=" + hub.addingPercentEncoding(withAllowedCharacters: .alphanumerics)! + "&token=mock"
-        // No draft from an earlier run: a long one makes the composer tall and pushes the reply up under the bar.
-        app.launchArguments = ["-pairURL", pair, "-openDraftsFresh", "YES"] + args
+        // Nothing kept from an earlier run: a long draft makes the composer tall and pushes the reply up under the bar,
+        // and the quotes testQuoteThePickedWords sent would pile up under the messages, pushing them off screen.
+        app.launchArguments = ["-pairURL", pair, "-openDraftsFresh", "YES", "-openChatsFresh", "YES"] + args
         app.launchPinned()
     }
 
