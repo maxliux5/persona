@@ -1,16 +1,18 @@
 import XCTest
 
-/// Long-press a message › Select Text: the message opens in a page where any part of it can be selected and copied, not
-/// only the whole of it (Copy). A reply reads as in the chat, without the Markdown marks; your own message stays as
-/// written (its bubble shows it plain: `__init__.py`, `2*3*4`, `# …`, `- …` are kept).
+/// Selecting a message's words (#3189, in place since #603): long-press a message and it is lifted; a second long press
+/// on it selects the word there, Select Text in its bar selects all of it, where it is, with the system's handles and
+/// edit menu. A reply reads as in the chat, without the Markdown marks; your own message stays as written (its bubble
+/// shows it plain: `__init__.py`, `2*3*4`, `# …`, `- …` are kept).
 ///   PORT=18950 MOCK_CHAT_READ=1 MOCK_SELECT_TEXT=1 MOCK_ECHO_SENT=1 python3 scripts/mock/mock_hub.py &
 ///   TEST_RUNNER_PERSONA_MOCK_HUB=http://127.0.0.1:18950 xcodebuild test … -only-testing:PersonaUITests/SelectTextTests
 /// Both styles (TEST_RUNNER_PERSONA_UI_STYLE=beautiful), iPhone and iPad; `TEST_RUNNER_PERSONA_SHOTS=<dir>` saves the
-/// page, named by the simulator's appearance (`simctl ui <udid> appearance light|dark`).
+/// screens, named by the simulator's appearance (`simctl ui <udid> appearance light|dark`).
 final class SelectTextTests: XCTestCase {
     private var app: XCUIApplication!
     private let agentChat = ["-tab", "dev", "-openSession", "macbook/a1f3c2d4-0000-4000-8000-0000000c1ead"]
     private let selectChat = ["-tab", "dev", "-openSession", "macbook/a1f3c2d4-0000-4000-8000-0000005e1ec7"]
+    private let richChat = ["-tab", "dev", "-openSession", "macbook/a1f3c2d4-0000-4000-8000-0000005e1ec8"]
     private let mainChat = ["-app.tab", "assistant", "-tab", "assistant", "-openAssistant", "server/b2e4d6f8-0000-4000-8000-000000000001"]
 
     override func setUpWithError() throws {
@@ -28,41 +30,57 @@ final class SelectTextTests: XCTestCase {
         app.launchPinned()
     }
 
-    /// Long-presses the message starting with `message` and opens Select Text; returns the page's text view.
-    @MainActor private func openSelection(_ message: String, shot name: String) -> XCUIElement {
+    /// The lifted message's words while they are selected.
+    private var words: XCUIElement { app.textViews["lift-text"] }
+
+    /// The edit menu's item (a menu item or a button, by the system's version).
+    private func menuItem(_ label: String) -> XCUIElement {
+        app.descendants(matching: .any).matching(NSPredicate(format: "(elementType == %d OR elementType == %d) AND label == %@",
+            XCUIElement.ElementType.menuItem.rawValue, XCUIElement.ElementType.button.rawValue, label)).firstMatch
+    }
+
+    /// Long-presses the message starting with `message`, where it is: its bar shows.
+    @MainActor private func lift(_ message: String, shot name: String) {
         let text = app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", message)).firstMatch
         XCTAssertTrue(text.waitForExistence(timeout: 20), "\(message) is not in the chat")
+        acceptIconAlert(timeout: 3) // the scheme's icon
         sleep(3) // the list settles at the newest message; the header folds
         // Rows of the flipped chat list may report flipped frames: press by the centre in the window.
         let window = app.windows.firstMatch.frame
         var f = text.frame
         if !window.contains(CGPoint(x: f.midX, y: f.midY)) { f.origin.y = window.height - f.maxY }
         app.coordinate(withNormalizedOffset: .zero).withOffset(CGVector(dx: f.midX, dy: f.midY)).press(forDuration: 0.6)
-        let select = app.buttons["选择文本"]
-        XCTAssertTrue(select.waitForExistence(timeout: 3), "the bar has no 选择文本:\n\(app.debugDescription)")
+        XCTAssertTrue(app.buttons["选择文本"].waitForExistence(timeout: 3), "the bar has no 选择文本:\n\(app.debugDescription)")
         XCTAssertTrue(app.buttons["复制"].exists, "复制 (the whole message) is gone")
+        sleep(1)
         shot(name + "-bar")
-        // On its label, the lower part: the message above may be drawn over the bar's top and take touches there
-        // (the rows' zIndex does not hold in the lazy list, a bug of its own).
-        select.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.85)).tap()
-        let page = app.textViews["selectable-text"]
-        XCTAssertTrue(page.waitForExistence(timeout: 5), "选择文本 did not open its page")
-        sleep(1) // the sheet's animation
-        shot(name)
-        return page
     }
 
-    /// Double-taps the page's first word (`word`, at the start of its first line), copies it from the edit menu and
-    /// checks the pasteboard holds exactly that word.
+    /// Lifts the message and taps Select Text: all of its words are selected where they are; returns them.
+    @MainActor private func openSelection(_ message: String, shot name: String) -> XCUIElement {
+        lift(message, shot: name)
+        // On its label, the lower part: the message above may be drawn over the bar's top and take touches there.
+        app.buttons["选择文本"].coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.85)).tap()
+        XCTAssertTrue(words.waitForExistence(timeout: 5), "选择文本 did not select the words in place:\n\(app.debugDescription)")
+        XCTAssertTrue(menuItem("拷贝").waitForExistence(timeout: 3), "no edit menu over the selected words:\n\(app.debugDescription)")
+        XCTAssertFalse(app.buttons["选择文本"].exists, "the bar stayed over the edit menu")
+        sleep(1)
+        shot(name)
+        return words
+    }
+
+    /// Double-taps the first word (`word`, at the start of the first line), copies it from the edit menu and checks the
+    /// pasteboard holds exactly that word; Copy puts the message back.
     @MainActor private func copyFirstWord(of page: XCUIElement, _ word: String) {
         UIPasteboard.general.string = "-"
-        page.coordinate(withNormalizedOffset: .zero).withOffset(CGVector(dx: 30, dy: 28)).doubleTap()
-        let copy = app.menuItems["拷贝"].exists ? app.menuItems["拷贝"] : app.buttons["拷贝"]
+        page.coordinate(withNormalizedOffset: .zero).withOffset(CGVector(dx: 12, dy: 10)).doubleTap()
+        let copy = menuItem("拷贝")
         XCTAssertTrue(copy.waitForExistence(timeout: 3), "no edit menu after a double tap:\n\(app.debugDescription)")
         shot("selected")
         copy.tap()
         sleep(1)
         XCTAssertEqual(pasted(), word)
+        XCTAssertTrue(page.waitForNonExistence(timeout: 3), "拷贝 did not put the message back")
     }
 
     /// What the app put on the pasteboard. The runner reading another app's copy asks first ("… would like to paste
@@ -89,11 +107,55 @@ final class SelectTextTests: XCTestCase {
         launch(selectChat)
         let page = openSelection("Yes", shot: "reply")
         XCTAssertEqual(page.value as? String, "Yes，2*3*4 没错，是 24。例子：\n\n```swift\nlet a = x*y*z\n```\n\n"
-                       + "公式 $x*y*z$ 照原样。\n\n    indented *code*\n\n* * *\n\n• 一\n\t• tab item")
+                       + "公式 $x*y*z$ 照原样。\n\nindented *code*\n\n* * *\n\n•\t一\n◦\ttab item")
         copyFirstWord(of: page, "Yes")
-        XCTAssertTrue(app.buttons["全部拷贝"].exists)
-        app.buttons["完成"].tap()
-        XCTAssertTrue(page.waitForNonExistence(timeout: 3), "完成 did not close the page")
+    }
+
+    /// A second long press on the lifted message selects the word under it, where it is: handles, the edit menu. A
+    /// tap beside it brings the bar back; one more closes it.
+    @MainActor func testASecondLongPressSelectsTheWordThere() throws {
+        launch(richChat)
+        lift("迁移计划", shot: "rich")
+        let lead = app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", "先把三个页面")).firstMatch
+        XCTAssertTrue(lead.exists, "the lifted reply's first paragraph is not on screen:\n\(app.debugDescription)")
+        let f = lead.frame
+        app.coordinate(withNormalizedOffset: .zero).withOffset(CGVector(dx: f.minX + 40, dy: f.midY)).press(forDuration: 0.8)
+        XCTAssertTrue(words.waitForExistence(timeout: 5), "a second long press did not select in place:\n\(app.debugDescription)")
+        XCTAssertTrue(menuItem("拷贝").waitForExistence(timeout: 3), "no edit menu:\n\(app.debugDescription)")
+        XCTAssertTrue(menuItem("引用").exists, "引用 is not in the edit menu")
+        XCTAssertFalse(app.buttons["选择文本"].exists, "the bar stayed over the edit menu")
+        let all = words.value as? String ?? ""
+        XCTAssertTrue(all.hasPrefix("迁移计划\n\n先把三个页面的数据请求合到一起"), all)
+        XCTAssertTrue(all.contains("export async function load(page: string) {"), "the code is not there: \(all)")
+        XCTAssertFalse(all.contains("```") || all.contains("**"), "Markdown marks are shown: \(all)")
+        sleep(1)
+        shot("pressed")
+        // Drag the selection's end down a line: a longer part.
+        app.coordinate(withNormalizedOffset: .zero).withOffset(CGVector(dx: f.minX + 66, dy: f.maxY + 2))
+            .press(forDuration: 0.3, thenDragTo: app.coordinate(withNormalizedOffset: .zero).withOffset(CGVector(dx: f.maxX - 20, dy: f.maxY + 2)))
+        sleep(1)
+        if !menuItem("拷贝").exists { words.coordinate(withNormalizedOffset: .zero).withOffset(CGVector(dx: f.width / 2, dy: 20)).tap() }
+        shot("range")
+        // Beside the words: the bar again, the message still lifted.
+        app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.04)).tap()
+        XCTAssertTrue(words.waitForNonExistence(timeout: 3), "a tap beside the words did not end the selecting")
+        XCTAssertTrue(app.buttons["选择文本"].waitForExistence(timeout: 3), "the bar did not come back")
+        app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.04)).tap()
+        XCTAssertTrue(app.buttons["选择文本"].waitForNonExistence(timeout: 3), "a second tap did not put the message back")
+    }
+
+    /// Select Text on a long reply with a table and code: all of it is selected where it is; Copy copies the table as
+    /// its Markdown, the rest as it reads.
+    @MainActor func testSelectTextSelectsAllOfALongReply() throws {
+        launch(richChat)
+        let page = openSelection("迁移计划", shot: "rich-all")
+        UIPasteboard.general.string = "-"
+        menuItem("拷贝").tap()
+        XCTAssertTrue(page.waitForNonExistence(timeout: 3), "拷贝 did not put the message back")
+        let copied = pasted()
+        XCTAssertTrue(copied.hasPrefix("迁移计划\n\n先把三个页面"), copied)
+        XCTAssertTrue(copied.contains("| 价格页 | 3 次请求 | 1 次 | 中：缓存键要改 |"), "the table is not copied as Markdown: \(copied)")
+        XCTAssertTrue(copied.hasSuffix("有变化再告诉你。"), copied)
     }
 
     /// Select Text › Quote (#4549): Quote leads the selection's menu and puts only the picked words over the box, as
@@ -101,14 +163,13 @@ final class SelectTextTests: XCTestCase {
     @MainActor func testQuoteThePickedWords() throws {
         launch(selectChat)
         let page = openSelection("Yes", shot: "quote")
-        page.coordinate(withNormalizedOffset: .zero).withOffset(CGVector(dx: 30, dy: 28)).doubleTap()
-        let pick = app.descendants(matching: .any).matching(NSPredicate(format: "(elementType == %d OR elementType == %d) AND label == %@",
-            XCUIElement.ElementType.menuItem.rawValue, XCUIElement.ElementType.button.rawValue, "引用")).firstMatch
+        page.coordinate(withNormalizedOffset: .zero).withOffset(CGVector(dx: 12, dy: 10)).doubleTap()
+        let pick = menuItem("引用")
         XCTAssertTrue(pick.waitForExistence(timeout: 3), "no 引用 in the selection's menu:\n\(app.debugDescription)")
         sleep(1) // the menu fades in
         shot("quote-menu")
         pick.tap()
-        XCTAssertTrue(page.waitForNonExistence(timeout: 3), "引用 did not close the page")
+        XCTAssertTrue(page.waitForNonExistence(timeout: 3), "引用 did not put the message back")
 
         let quotes = app.descendants(matching: .any).matching(identifier: "composer.quotes").firstMatch
         XCTAssertTrue(quotes.waitForExistence(timeout: 3), "no quote over the box")
@@ -135,29 +196,24 @@ final class SelectTextTests: XCTestCase {
         copyFirstWord(of: page, "Python")
     }
 
-    /// An Agents reply with a fenced code block: the page shows the prose and the code without the fence.
+    /// An Agents reply with a fenced code block: the prose and the code without the fence.
     @MainActor func testAnAgentReplyReadsAsInTheChat() throws {
         launch(agentChat)
         let page = openSelection("改好了，测试全过", shot: "agent")
         let all = page.value as? String ?? ""
         XCTAssertTrue(all.hasPrefix("改好了，测试全过。新的写法：\n\n"), all)
-        XCTAssertTrue(all.contains("let hours = forecast.hours"), "the code is not on the page: \(all)")
+        XCTAssertTrue(all.contains("let hours = forecast.hours"), "the code is not there: \(all)")
         XCTAssertFalse(all.contains("```"), "the fence is shown: \(all)")
         XCTAssertTrue(all.contains("$S = \\pi r^2$"), "the formula is not as written: \(all)")
     }
 
-    /// Persona's main conversation: bold and a numbered list read as they do in the chat, without `**`; Copy All
-    /// copies the message as written.
+    /// Persona's main conversation: bold and a numbered list read as they do in the chat, without `**`.
     @MainActor func testAPersonaReplyReadsAsInTheChat() throws {
         launch(mainChat)
         let page = openSelection("今天有", shot: "persona")
         let all = page.value as? String ?? ""
-        XCTAssertTrue(all.hasPrefix("今天有 3 件事需要你："), "the page shows the Markdown marks: \(all)")
-        XCTAssertTrue(all.contains("1. 补齐网络层的单元测试"), "the list is not on the page: \(all)")
-        UIPasteboard.general.string = "-"
-        app.buttons["全部拷贝"].tap()
-        XCTAssertTrue(page.waitForNonExistence(timeout: 3), "全部拷贝 did not close the page")
-        XCTAssertTrue(pasted().hasPrefix("今天有 **3 件事**需要你："), "全部拷贝 did not copy the message as written")
+        XCTAssertTrue(all.hasPrefix("今天有 3 件事需要你："), "the Markdown marks are shown: \(all)")
+        XCTAssertTrue(all.contains("1.\t补齐网络层的单元测试"), "the list is not there: \(all)")
     }
 
     @MainActor private func shot(_ name: String) {
