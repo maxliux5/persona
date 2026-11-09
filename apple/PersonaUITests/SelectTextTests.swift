@@ -30,25 +30,32 @@ final class SelectTextTests: XCTestCase {
         app.launchPinned()
         // A draft left in the chat (kept on disk) makes the composer tall and pushes the reply up under the bar.
         let field = composer
-        if field.waitForExistence(timeout: 20), let text = field.value as? String, !text.isEmpty, text != field.placeholderValue {
-            clear(field)
+        if field.waitForExistence(timeout: 20), !blank(field) {
+            clear()
             app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.3)).tap() // the keyboard down again
         }
     }
 
     private var composer: XCUIElement { app.descendants(matching: .any)["shell-composer-field"].firstMatch }
 
+    /// Points kept clear of an edge when pressing inside a frame.
+    private static let inset: CGFloat = 12
+
+    /// Nothing typed in the field (its value is then its placeholder, or only spaces and line breaks).
+    @MainActor private func blank(_ field: XCUIElement) -> Bool {
+        let text = field.value as? String ?? ""
+        return text == field.placeholderValue || text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
     /// Empties the composer: the cursor put at the end of its last line, then deleted back, a few times if need be.
-    @MainActor private func clear(_ field: XCUIElement) {
-        for _ in 0..<3 {
-            let text = field.value as? String ?? ""
-            guard !text.isEmpty, text != field.placeholderValue else { break }
-            field.coordinate(withNormalizedOffset: CGVector(dx: 0.97, dy: 0.92)).tap()
-            field.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: text.count + 4))
+    /// The field is looked up each time: it is built again when it grows or shrinks, or after a system prompt.
+    @MainActor private func clear() {
+        for _ in 0..<3 where !blank(composer) {
+            let count = (composer.value as? String ?? "").count
+            composer.coordinate(withNormalizedOffset: CGVector(dx: 0.97, dy: 0.92)).tap()
+            composer.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: count + 4))
         }
-        if (field.value as? String).map({ $0.isEmpty || $0 == field.placeholderValue }) != true {
-            XCTFail("the composer is not empty: \(field.value ?? "")")
-        }
+        XCTAssertTrue(blank(composer), "the composer is not empty: \(String(reflecting: composer.value))")
     }
 
     /// The lifted message's words while they are selected.
@@ -70,7 +77,11 @@ final class SelectTextTests: XCTestCase {
         let window = app.windows.firstMatch.frame
         var f = text.frame
         if !window.contains(CGPoint(x: f.midX, y: f.midY)) { f.origin.y = window.height - f.maxY }
-        app.coordinate(withNormalizedOffset: .zero).withOffset(CGVector(dx: f.midX, dy: f.midY)).press(forDuration: 0.6)
+        // Where it shows: below the top bar (a tall message can start under it; a press there goes to the bar).
+        let bar = app.buttons["chat.title"].firstMatch
+        let top = bar.exists ? bar.frame.maxY + Self.inset : 0
+        let y = min(max(f.midY, top), f.maxY - Self.inset)
+        app.coordinate(withNormalizedOffset: .zero).withOffset(CGVector(dx: f.midX, dy: y)).press(forDuration: 0.6)
         XCTAssertTrue(app.buttons["选择文本"].waitForExistence(timeout: 3), "the bar has no 选择文本:\n\(app.debugDescription)")
         XCTAssertTrue(app.buttons["复制"].exists, "复制 (the whole message) is gone")
         sleep(1)
@@ -116,8 +127,8 @@ final class SelectTextTests: XCTestCase {
         XCTAssertTrue(paste.waitForExistence(timeout: 3), "no 粘贴 in the composer's edit menu:\n\(app.debugDescription)")
         paste.tap()
         sleep(1)
-        let got = field.value as? String ?? ""
-        clear(field)
+        let got = composer.value as? String ?? ""
+        clear()
         return got
     }
 
