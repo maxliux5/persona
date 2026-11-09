@@ -140,9 +140,12 @@ private struct LiftTextView: UIViewRepresentable {
 }
 
 /// The words in a read-only text view, laid out by `ReplyLayout` (TextKit 1, which draws what is behind the blocks).
-final class LiftUITextView: UITextView, UITextViewDelegate {
+final class LiftUITextView: UITextView, UITextViewDelegate, UIEditMenuInteractionDelegate {
     private let storage = NSTextStorage()
     private let layout = ReplyLayout()
+    /// The menu shown over the words a press picked. The text view's own menu only comes up on its own gestures, and
+    /// its interaction is not among `interactions`; this one shows the same items.
+    private lazy var menuInteraction = UIEditMenuInteraction(delegate: self)
     private var source: (text: String, words: LiftWords)?
     /// The width the words were laid out for (a table's picture and columns depend on it).
     private var laidOut: CGFloat = 0
@@ -167,6 +170,7 @@ final class LiftUITextView: UITextView, UITextViewDelegate {
         backgroundColor = .clear
         delegate = self
         accessibilityIdentifier = "lift-text"
+        addInteraction(menuInteraction)
         registerForTraitChanges([UITraitPreferredContentSizeCategory.self, UITraitUserInterfaceStyle.self]) { (v: LiftUITextView, _) in
             v.render(width: v.laidOut)
         }
@@ -240,8 +244,12 @@ final class LiftUITextView: UITextView, UITextViewDelegate {
         let rects = selectionRects(for: range).map(\.rect).filter { !$0.isEmpty && $0.width > 0 }
         guard let first = rects.first else { return }
         let box = rects.dropFirst().reduce(first) { $0.union($1) }.intersection(bounds)
-        let edit = interactions.lazy.compactMap { $0 as? UIEditMenuInteraction }.first
-        edit?.presentEditMenu(with: UIEditMenuConfiguration(identifier: nil, sourcePoint: CGPoint(x: box.midX, y: box.minY)))
+        menuInteraction.presentEditMenu(with: UIEditMenuConfiguration(identifier: nil, sourcePoint: CGPoint(x: box.midX, y: box.minY)))
+    }
+
+    func editMenuInteraction(_ interaction: UIEditMenuInteraction, menuFor configuration: UIEditMenuConfiguration,
+                             suggestedActions: [UIMenuElement]) -> UIMenu? {
+        textView(self, editMenuForTextIn: selectedRange, suggestedActions: suggestedActions)
     }
 
     func textViewDidChangeSelection(_ textView: UITextView) {
@@ -810,17 +818,20 @@ enum ReplyText {
         let n = CGFloat(m.natural.count)
         let plan = TablePlan.fit(natural: m.natural, minimum: m.minimum,
                                  available: width - n * (FittedTable.cellPadding + FittedTable.border) - FittedTable.border * 3)
+        // The table's style inside the theme: the nearer one wins, and the theme's own table scrolls (a renderer draws no
+        // scroll views at all).
         let table = Markdown(source)
-            .markdownTheme(.persona)
             .markdownBlockStyle(\.table) { config in
                 FittedTable.drawn(config.label).environment(\.tableColumnWidths, plan.widths)
             }
-            .fixedSize(horizontal: plan.scrolls, vertical: true)
-            .frame(width: plan.scrolls ? nil : width, alignment: .leading)
+            .markdownTheme(.persona)
+            // At the columns' planned widths: no clear space beside a narrow table (it would be selected as part of it);
+            // one wider than the words is scaled down to them where it is attached.
+            .fixedSize()
             .environment(\.colorScheme, traits.userInterfaceStyle == .dark ? .dark : .light)
             .environment(\.dynamicTypeSize, DynamicTypeSize(traits.preferredContentSizeCategory) ?? .large)
         let r = ImageRenderer(content: table)
-        r.proposedSize = ProposedViewSize(width: plan.scrolls ? nil : width, height: nil)
+        r.proposedSize = .unspecified
         r.scale = traits.displayScale > 0 ? traits.displayScale : 3
         return r.uiImage
     }

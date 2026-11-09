@@ -111,6 +111,32 @@ struct ReplyTextTests {
         #expect(ReplyText.copyText(s) == "看表：\n\n" + table + "\n\n完")
     }
 
+    /// A table is the chat's table as a picture: its words are drawn, not an empty box, and it fits the width.
+    @Test func aTableIsDrawn() throws {
+        let image = try #require(ReplyTable.picture("| 页面 | 风险 |\n| --- | --- |\n| 首页 | 低 |", width: 360, traits: look.traits))
+        #expect(image.size.width > 60 && image.size.width < 200 && image.size.height > 40, "\(image.size)") // its own width
+        if let dir = ProcessInfo.processInfo.environment["PERSONA_SHOTS"], let png = image.pngData() {
+            try? png.write(to: URL(fileURLWithPath: dir).appending(path: "reply-table.png"))
+        }
+        #expect(try ink(image) > 200)
+        // And in the words: the attachment carries it.
+        let s = reply("看表：\n\n| 页面 | 风险 |\n| --- | --- |\n| 首页 | 低 |")
+        let at = (s.string as NSString).range(of: "\u{FFFC}").location
+        let attached = try #require((s.attribute(.attachment, at: at, effectiveRange: nil) as? NSTextAttachment)?.image)
+        #expect(try ink(attached) > 200)
+    }
+
+    /// Pixels with (nearly) full alpha: the words, not the faint rules and rows.
+    private func ink(_ image: UIImage) throws -> Int {
+        let cg = try #require(image.cgImage)
+        let w = cg.width, h = cg.height
+        var px = [UInt8](repeating: 0, count: w * h * 4)
+        let ctx = try #require(CGContext(data: &px, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w * 4,
+                                         space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
+        ctx.draw(cg, in: CGRect(x: 0, y: 0, width: w, height: h))
+        return stride(from: 3, to: px.count, by: 4).filter { px[$0] > 200 }.count
+    }
+
     @Test func plainTextIsUnchanged() {
         let text = "PR #42 看完了：逻辑没问题。\n#不是标题\n2 * 3 = 6"
         #expect(shown(text) == text)

@@ -83,22 +83,31 @@ final class SelectTextTests: XCTestCase {
         XCTAssertTrue(page.waitForNonExistence(timeout: 3), "拷贝 did not put the message back")
     }
 
-    /// What the app put on the pasteboard. The runner reading another app's copy asks first ("… would like to paste
-    /// from Persona"), and that read blocks until it is answered: read off the main thread and allow it on SpringBoard.
+    /// What the app put on the pasteboard, pasted into the composer from its edit menu: a paste the user taps asks
+    /// nothing (the runner reading the app's copy itself is not allowed here, as in PendingBubbleMenuTests). The
+    /// composer is emptied again, so no draft is left for the next test.
     @MainActor private func pasted() -> String {
-        nonisolated(unsafe) var got: String?
-        let done = DispatchSemaphore(value: 0)
-        DispatchQueue.global().async {
-            got = UIPasteboard.general.string
-            done.signal()
+        let field = app.descendants(matching: .any)["shell-composer-field"].firstMatch
+        XCTAssertTrue(field.waitForExistence(timeout: 5), "no composer:\n\(app.debugDescription)")
+        field.tap()
+        field.press(forDuration: 1.0)
+        let paste = menuItem("粘贴")
+        XCTAssertTrue(paste.waitForExistence(timeout: 3), "no 粘贴 in the composer's edit menu:\n\(app.debugDescription)")
+        paste.tap()
+        sleep(1)
+        let got = field.value as? String ?? ""
+        field.press(forDuration: 1.0)
+        let all = menuItem("全选")
+        if all.waitForExistence(timeout: 3) {
+            all.tap()
+            field.typeText(XCUIKeyboardKey.delete.rawValue)
         }
-        let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
-        let allow = springboard.buttons.matching(NSPredicate(format: "label IN %@", ["Allow Paste", "允许粘贴"])).firstMatch
-        let deadline = Date.now.addingTimeInterval(10)
-        while done.wait(timeout: .now() + 0.3) == .timedOut && Date.now < deadline {
-            if allow.exists { allow.tap() }
-        }
-        return got ?? ""
+        return got
+    }
+
+    /// Beside the lifted message, on the scrim: below the status bar, whose taps never reach the app.
+    @MainActor private func tapBeside() {
+        app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.12)).tap()
     }
 
     /// A reply with a fence inside a longer fence, a formula, indented code, a rule and a tab-indented item: the
@@ -130,17 +139,18 @@ final class SelectTextTests: XCTestCase {
         XCTAssertFalse(all.contains("```") || all.contains("**"), "Markdown marks are shown: \(all)")
         sleep(1)
         shot("pressed")
-        // Drag the selection's end down a line: a longer part.
-        app.coordinate(withNormalizedOffset: .zero).withOffset(CGVector(dx: f.minX + 66, dy: f.maxY + 2))
-            .press(forDuration: 0.3, thenDragTo: app.coordinate(withNormalizedOffset: .zero).withOffset(CGVector(dx: f.maxX - 20, dy: f.maxY + 2)))
+        // A triple tap on the paragraph (its line in the text view): all of it, a longer part.
+        let line = words.textViews.matching(NSPredicate(format: "label BEGINSWITH %@", "先把三个页面")).firstMatch
+        XCTAssertTrue(line.exists, "the paragraph is not a line of the words:\n\(words.debugDescription)")
+        line.tap(withNumberOfTaps: 3, numberOfTouches: 1)
+        XCTAssertTrue(menuItem("拷贝").waitForExistence(timeout: 3), "no edit menu over the paragraph:\n\(app.debugDescription)")
         sleep(1)
-        if !menuItem("拷贝").exists { words.coordinate(withNormalizedOffset: .zero).withOffset(CGVector(dx: f.width / 2, dy: 20)).tap() }
         shot("range")
         // Beside the words: the bar again, the message still lifted.
-        app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.04)).tap()
+        tapBeside()
         XCTAssertTrue(words.waitForNonExistence(timeout: 3), "a tap beside the words did not end the selecting")
         XCTAssertTrue(app.buttons["选择文本"].waitForExistence(timeout: 3), "the bar did not come back")
-        app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.04)).tap()
+        tapBeside()
         XCTAssertTrue(app.buttons["选择文本"].waitForNonExistence(timeout: 3), "a second tap did not put the message back")
     }
 
@@ -210,7 +220,7 @@ final class SelectTextTests: XCTestCase {
     /// Persona's main conversation: bold and a numbered list read as they do in the chat, without `**`.
     @MainActor func testAPersonaReplyReadsAsInTheChat() throws {
         launch(mainChat)
-        let page = openSelection("今天有", shot: "persona")
+        let page = openSelection("今天有 3", shot: "persona")
         let all = page.value as? String ?? ""
         XCTAssertTrue(all.hasPrefix("今天有 3 件事需要你："), "the Markdown marks are shown: \(all)")
         XCTAssertTrue(all.contains("1.\t补齐网络层的单元测试"), "the list is not there: \(all)")
