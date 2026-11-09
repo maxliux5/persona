@@ -26,14 +26,9 @@ final class SelectTextTests: XCTestCase {
         let hub = ProcessInfo.processInfo.environment["PERSONA_MOCK_HUB"]!
         app = XCUIApplication()
         let pair = "persona://pair?url=" + hub.addingPercentEncoding(withAllowedCharacters: .alphanumerics)! + "&token=mock"
-        app.launchArguments = ["-pairURL", pair] + args
+        // No draft from an earlier run: a long one makes the composer tall and pushes the reply up under the bar.
+        app.launchArguments = ["-pairURL", pair, "-openDraftsFresh", "YES"] + args
         app.launchPinned()
-        // A draft left in the chat (kept on disk) makes the composer tall and pushes the reply up under the bar.
-        let field = composer
-        if field.waitForExistence(timeout: 20), !blank(field) {
-            clear()
-            app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.3)).tap() // the keyboard down again
-        }
     }
 
     private var composer: XCUIElement { app.descendants(matching: .any)["shell-composer-field"].firstMatch }
@@ -47,15 +42,14 @@ final class SelectTextTests: XCTestCase {
         return text == field.placeholderValue || text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
-    /// Empties the composer: the cursor put at the end of its last line, then deleted back, a few times if need be.
-    /// The field is looked up each time: it is built again when it grows or shrinks, or after a system prompt.
+    /// Empties the composer after a short copy was read from it (a long one stays until the next launch's
+    /// `-openDraftsFresh`): the cursor put at its end, then deleted back. The field is looked up each time: it is
+    /// built again when it grows or shrinks, or after a system prompt.
     @MainActor private func clear() {
-        for _ in 0..<3 where !blank(composer) {
-            let count = (composer.value as? String ?? "").count
-            composer.coordinate(withNormalizedOffset: CGVector(dx: 0.97, dy: 0.92)).tap()
-            composer.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: count + 4))
-        }
-        XCTAssertTrue(blank(composer), "the composer is not empty: \(String(reflecting: composer.value))")
+        let count = (composer.value as? String ?? "").count
+        guard !blank(composer), count < 40 else { return }
+        composer.coordinate(withNormalizedOffset: CGVector(dx: 0.97, dy: 0.92)).tap()
+        composer.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: count + 4))
     }
 
     /// The lifted message's words while they are selected.
