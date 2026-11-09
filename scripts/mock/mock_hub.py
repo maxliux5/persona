@@ -8289,7 +8289,9 @@ export async function load(page: string) {
 
 > 价格页的缓存键改了以后，旧缓存要等一天才过期。
 
-做完我会再跑一次首屏时间对比，**有变化再告诉你**。"""
+做完我会再跑一次首屏时间对比。
+
+**有变化再告诉你**。"""
 if os.environ.get("MOCK_SELECT_TEXT") == "1":
     SESSIONS.append(sess("macbook", SELECT_TEXT, "选择文本", "/Users/me/code/weather", "done", "read", "weather", 1, "select", 2, 1, "Yes"))
     ITEMS[SELECT_TEXT] = [

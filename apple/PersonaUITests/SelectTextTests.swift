@@ -121,7 +121,8 @@ final class SelectTextTests: XCTestCase {
     }
 
     /// A second long press on the lifted message selects the word under it, where it is: handles, the edit menu. A
-    /// tap beside it brings the bar back; one more closes it.
+    /// tap beside it brings the bar back; one more closes it. (Any tap in the words clears the selection, which ends
+    /// the selecting too: a range is made with the handles, `testDragTheEndForAPart`.)
     @MainActor func testASecondLongPressSelectsTheWordThere() throws {
         launch(richChat)
         lift("迁移计划", shot: "rich")
@@ -139,13 +140,6 @@ final class SelectTextTests: XCTestCase {
         XCTAssertFalse(all.contains("```") || all.contains("**"), "Markdown marks are shown: \(all)")
         sleep(1)
         shot("pressed")
-        // A triple tap on the paragraph (its line in the text view): all of it, a longer part.
-        let line = words.textViews.matching(NSPredicate(format: "label BEGINSWITH %@", "先把三个页面")).firstMatch
-        XCTAssertTrue(line.exists, "the paragraph is not a line of the words:\n\(words.debugDescription)")
-        line.tap(withNumberOfTaps: 3, numberOfTouches: 1)
-        XCTAssertTrue(menuItem("拷贝").waitForExistence(timeout: 3), "no edit menu over the paragraph:\n\(app.debugDescription)")
-        sleep(1)
-        shot("range")
         // Beside the words: the bar again, the message still lifted.
         tapBeside()
         XCTAssertTrue(words.waitForNonExistence(timeout: 3), "a tap beside the words did not end the selecting")
@@ -166,6 +160,36 @@ final class SelectTextTests: XCTestCase {
         XCTAssertTrue(copied.hasPrefix("迁移计划\n\n先把三个页面"), copied)
         XCTAssertTrue(copied.contains("| 价格页 | 3 次请求 | 1 次 | 中：缓存键要改 |"), "the table is not copied as Markdown: \(copied)")
         XCTAssertTrue(copied.hasSuffix("有变化再告诉你。"), copied)
+    }
+
+    /// Select Text on the long reply, then its end handle dragged up to the end of 「步骤：」: that part is selected, the
+    /// edit menu comes back over it, and Copy copies just it (the table as its Markdown).
+    @MainActor func testDragTheEndForAPart() throws {
+        launch(richChat)
+        let page = openSelection("迁移计划", shot: "rich-part")
+        try dragEnd(of: page, to: "步骤：")
+        XCTAssertTrue(menuItem("拷贝").waitForExistence(timeout: 3), "no edit menu over the part:\n\(app.debugDescription)")
+        sleep(1)
+        shot("rich-part-range")
+        UIPasteboard.general.string = "-"
+        menuItem("拷贝").tap()
+        XCTAssertTrue(page.waitForNonExistence(timeout: 3), "拷贝 did not put the message back")
+        let copied = pasted()
+        XCTAssertTrue(copied.hasPrefix("迁移计划\n\n先把三个页面"), copied)
+        XCTAssertTrue(copied.contains("| 价格页 | 3 次请求 | 1 次 | 中：缓存键要改 |"), copied)
+        XCTAssertTrue(copied.trimmingCharacters(in: .whitespacesAndNewlines).hasSuffix("步骤："), copied)
+    }
+
+    /// Drags the selection's end handle (under the end of the last paragraph, a short line) to the end of the
+    /// one-line paragraph `line`. The paragraphs are the text view's elements, at their words' frames.
+    @MainActor private func dragEnd(of page: XCUIElement, to line: String) throws {
+        let paragraphs = page.textViews.allElementsBoundByIndex.filter { !$0.label.isEmpty }
+        let last = try XCTUnwrap(paragraphs.last, "no paragraphs:\n\(page.debugDescription)").frame
+        let target = try XCTUnwrap(paragraphs.first { $0.label == line }, "no \(line):\n\(page.debugDescription)").frame
+        let origin = app.coordinate(withNormalizedOffset: .zero)
+        origin.withOffset(CGVector(dx: last.maxX - 1, dy: last.maxY + 4))
+            .press(forDuration: 0.5, thenDragTo: origin.withOffset(CGVector(dx: target.maxX - 1, dy: target.maxY - 4)))
+        sleep(1)
     }
 
     /// Select Text › Quote (#4549): Quote leads the selection's menu and puts only the picked words over the box, as
