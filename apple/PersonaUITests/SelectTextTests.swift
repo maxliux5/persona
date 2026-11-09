@@ -28,6 +28,27 @@ final class SelectTextTests: XCTestCase {
         let pair = "persona://pair?url=" + hub.addingPercentEncoding(withAllowedCharacters: .alphanumerics)! + "&token=mock"
         app.launchArguments = ["-pairURL", pair] + args
         app.launchPinned()
+        // A draft left in the chat (kept on disk) makes the composer tall and pushes the reply up under the bar.
+        let field = composer
+        if field.waitForExistence(timeout: 20), let text = field.value as? String, !text.isEmpty, text != field.placeholderValue {
+            clear(field)
+            app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.3)).tap() // the keyboard down again
+        }
+    }
+
+    private var composer: XCUIElement { app.descendants(matching: .any)["shell-composer-field"].firstMatch }
+
+    /// Empties the composer: the cursor put at the end of its last line, then deleted back, a few times if need be.
+    @MainActor private func clear(_ field: XCUIElement) {
+        for _ in 0..<3 {
+            let text = field.value as? String ?? ""
+            guard !text.isEmpty, text != field.placeholderValue else { break }
+            field.coordinate(withNormalizedOffset: CGVector(dx: 0.97, dy: 0.92)).tap()
+            field.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: text.count + 4))
+        }
+        if (field.value as? String).map({ $0.isEmpty || $0 == field.placeholderValue }) != true {
+            XCTFail("the composer is not empty: \(field.value ?? "")")
+        }
     }
 
     /// The lifted message's words while they are selected.
@@ -87,7 +108,7 @@ final class SelectTextTests: XCTestCase {
     /// nothing (the runner reading the app's copy itself is not allowed here, as in PendingBubbleMenuTests). The
     /// composer is emptied again, so no draft is left for the next test.
     @MainActor private func pasted() -> String {
-        let field = app.descendants(matching: .any)["shell-composer-field"].firstMatch
+        let field = composer
         XCTAssertTrue(field.waitForExistence(timeout: 5), "no composer:\n\(app.debugDescription)")
         field.tap()
         field.press(forDuration: 1.0)
@@ -96,12 +117,7 @@ final class SelectTextTests: XCTestCase {
         paste.tap()
         sleep(1)
         let got = field.value as? String ?? ""
-        field.press(forDuration: 1.0)
-        let all = menuItem("全选")
-        if all.waitForExistence(timeout: 3) {
-            all.tap()
-            field.typeText(XCUIKeyboardKey.delete.rawValue)
-        }
+        clear(field)
         return got
     }
 
