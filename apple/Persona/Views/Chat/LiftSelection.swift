@@ -143,6 +143,9 @@ private struct LiftTextView: UIViewRepresentable {
 final class LiftUITextView: UITextView, UITextViewDelegate, UIEditMenuInteractionDelegate {
     private let storage = NSTextStorage()
     private let layout = ReplyLayout()
+    /// What is behind the words' blocks, under the selection's highlight: drawn with the words, a code block's
+    /// background covered the highlight and a selected block looked unselected.
+    private let behind = ReplyBlocksView()
     /// The menu shown over the words a press picked. The text view's own menu only comes up on its own gestures, and
     /// its interaction is not among `interactions`; this one shows the same items.
     private lazy var menuInteraction = UIEditMenuInteraction(delegate: self)
@@ -170,6 +173,11 @@ final class LiftUITextView: UITextView, UITextViewDelegate, UIEditMenuInteractio
         backgroundColor = .clear
         delegate = self
         accessibilityIdentifier = "lift-text"
+        behind.layout = layout
+        behind.isUserInteractionEnabled = false
+        behind.backgroundColor = .clear
+        behind.layer.zPosition = -1 // under every other layer of the text view, the highlight's too
+        insertSubview(behind, at: 0)
         addInteraction(menuInteraction)
         registerForTraitChanges([UITraitPreferredContentSizeCategory.self, UITraitUserInterfaceStyle.self]) { (v: LiftUITextView, _) in
             v.render(width: v.laidOut)
@@ -192,6 +200,7 @@ final class LiftUITextView: UITextView, UITextViewDelegate, UIEditMenuInteractio
         case .plain: ReplyText.plain(source.text, look: look)
         case .reply: ReplyText.attributed(source.text, look: look, width: width)
         }
+        behind.setNeedsDisplay()
     }
 
     func height(for width: CGFloat) -> CGFloat {
@@ -202,6 +211,52 @@ final class LiftUITextView: UITextView, UITextViewDelegate, UIEditMenuInteractio
     override func layoutSubviews() {
         if bounds.width > 0, abs(bounds.width - laidOut) > 0.5, !picked { render(width: bounds.width) }
         super.layoutSubviews()
+        let frame = CGRect(x: 0, y: 0, width: bounds.width, height: max(bounds.height, contentSize.height))
+        if behind.frame != frame {
+            behind.frame = frame
+            behind.setNeedsDisplay()
+        }
+    }
+
+    /// The selection's highlight, the same on every line: a line it covers to its end reaches across the whole width,
+    /// a table's line and the last line as much as a paragraph's (the system's stopped at a table's edge and at the
+    /// last word). Where the selection starts or ends inside a line, the highlight does too; the end handle stays after
+    /// the last selected word.
+    override func selectionRects(for range: UITextRange) -> [UITextSelectionRect] {
+        let start = offset(from: beginningOfDocument, to: range.start), end = offset(from: beginningOfDocument, to: range.end)
+        let text = storage.string as NSString
+        guard end > start, end <= text.length, let container = layout.textContainers.first else { return super.selectionRects(for: range) }
+        let inset = textContainerInset, right = inset.left + container.size.width
+        var out: [LineSelectionRect] = []
+        let glyphs = layout.glyphRange(forCharacterRange: NSRange(location: start, length: end - start), actualCharacterRange: nil)
+        layout.enumerateLineFragments(forGlyphRange: glyphs) { line, used, _, lineGlyphs, _ in
+            let chars = self.layout.characterRange(forGlyphRange: lineGlyphs, actualGlyphRange: nil)
+            let lineEnd = NSMaxRange(chars)
+            let from = max(chars.location, start), to = min(lineEnd, end)
+            guard to > from else { return }
+            // Where the words of this line end (before its line break), and where a character of it starts.
+            let wordsEnd = lineEnd > chars.location && text.character(at: lineEnd - 1) == 0x0A ? lineEnd - 1 : lineEnd
+            func x(_ at: Int) -> CGFloat {
+                guard at < wordsEnd else { return inset.left + used.maxX }
+                return inset.left + line.minX + self.layout.location(forGlyphAt: self.layout.glyphIndexForCharacter(at: at)).x
+            }
+            let top = inset.top + line.minY, height = line.height
+            let left = from == chars.location ? inset.left : x(from)
+            func add(_ a: CGFloat, _ b: CGFloat, start: Bool, end: Bool) {
+                out.append(LineSelectionRect(CGRect(x: a, y: top, width: max(0, b - a), height: height), start: start, end: end))
+            }
+            if to < end {
+                add(left, right, start: from == start, end: false) // it goes on below: the line to its end
+            } else if to == lineEnd {
+                // it ends with the line: across the whole width, the end handle after the line's last word
+                let at = x(to)
+                add(left, at, start: from == start, end: true)
+                if at < right { add(at, right, start: false, end: false) }
+            } else {
+                add(left, x(to), start: from == start, end: true)
+            }
+        }
+        return out.isEmpty ? super.selectionRects(for: range) : out
     }
 
     /// Selects the word at the press (or everything) once the view is in its window, and shows the edit menu.
@@ -315,29 +370,53 @@ final class ReplyBlock: NSObject {
     }
 }
 
-/// Lays out the words with TextKit 1 and draws what is behind their blocks (`ReplyBlock`), each block whole even when
-/// only part of it is being drawn. TextKit calls it while the text view draws, on the main thread.
+/// Lays out the words with TextKit 1; where their blocks (`ReplyBlock`) are is read from it.
 nonisolated final class ReplyLayout: NSLayoutManager {
-    override func drawBackground(forGlyphRange glyphsToShow: NSRange, at origin: CGPoint) {
-        super.drawBackground(forGlyphRange: glyphsToShow, at: origin)
-        guard let storage = textStorage, let container = textContainers.first else { return }
-        let shown = characterRange(forGlyphRange: glyphsToShow, actualGlyphRange: nil)
-        let all = NSRange(location: 0, length: storage.length)
-        var blocks: [(ReplyBlock, CGRect)] = []
-        storage.enumerateAttribute(.replyBlock, in: shown) { value, range, _ in
-            guard let block = value as? ReplyBlock, !blocks.contains(where: { $0.0 === block }) else { return }
-            var whole = NSRange()
-            _ = storage.attribute(.replyBlock, at: range.location, longestEffectiveRange: &whole, in: all)
-            let glyphs = glyphRange(forCharacterRange: whole, actualCharacterRange: nil)
+    /// Each block with the lines it spans, in the text container's coordinates.
+    @MainActor func blocks() -> [(ReplyBlock, CGRect)] {
+        guard let storage = textStorage else { return [] }
+        var out: [(ReplyBlock, CGRect)] = []
+        storage.enumerateAttribute(.replyBlock, in: NSRange(location: 0, length: storage.length)) { value, range, _ in
+            guard let block = value as? ReplyBlock else { return }
             var lines = CGRect.null
-            enumerateLineFragments(forGlyphRange: glyphs) { _, used, _, _, _ in lines = lines.union(used) }
-            if !lines.isNull { blocks.append((block, lines.offsetBy(dx: origin.x, dy: origin.y))) }
+            enumerateLineFragments(forGlyphRange: glyphRange(forCharacterRange: range, actualCharacterRange: nil)) { _, used, _, _, _ in
+                lines = lines.union(used)
+            }
+            guard !lines.isNull else { return }
+            if let i = out.firstIndex(where: { $0.0 === block }) { out[i].1 = out[i].1.union(lines) } else { out.append((block, lines)) }
         }
-        let width = container.size.width, drawn = blocks
-        MainActor.assumeIsolated {
-            for (block, lines) in drawn { block.draw(lines: lines, x: origin.x, width: width) }
-        }
+        return out
     }
+}
+
+/// What is behind the words' blocks (a code block's background, a quote's bar, a rule), under the text view's
+/// selection highlight (`LiftUITextView.behind`).
+final class ReplyBlocksView: UIView {
+    weak var layout: ReplyLayout?
+
+    override func draw(_ rect: CGRect) {
+        guard let layout, let container = layout.textContainers.first else { return }
+        for (block, lines) in layout.blocks() { block.draw(lines: lines, x: 0, width: container.size.width) }
+    }
+}
+
+/// A line of the selection's highlight (`LiftUITextView.selectionRects(for:)`).
+final class LineSelectionRect: UITextSelectionRect {
+    private let box: CGRect
+    private let start: Bool
+    private let end: Bool
+
+    init(_ box: CGRect, start: Bool, end: Bool) {
+        self.box = box
+        self.start = start
+        self.end = end
+    }
+
+    override var rect: CGRect { box }
+    override var writingDirection: NSWritingDirection { .leftToRight }
+    override var containsStart: Bool { start }
+    override var containsEnd: Bool { end }
+    override var isVertical: Bool { false }
 }
 
 /// A reply's Markdown laid out as the chat draws it (`MarkdownUI.Theme.persona`, `ReplyMetrics`), for selecting: what

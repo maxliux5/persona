@@ -126,6 +126,31 @@ struct ReplyTextTests {
         #expect(try ink(attached) > 200)
     }
 
+    /// Selected to their ends, lines are highlighted across the whole width, a table's and the last line's too (the
+    /// system's stopped at the table and at the last word); the end handle stays after the last word; a word inside a
+    /// line is highlighted just where it is.
+    @Test func theHighlightIsEvenAcrossLines() throws {
+        let v = LiftUITextView()
+        v.frame = CGRect(x: 0, y: 0, width: 320, height: 1000)
+        v.show("看表：\n\n| 页面 | 风险 |\n| --- | --- |\n| 首页 | 低 |\n\n做完再说。", .reply(quiet: false))
+        v.layoutIfNeeded()
+        let all = try #require(v.textRange(from: v.beginningOfDocument, to: v.endOfDocument))
+        let rects = v.selectionRects(for: all)
+        for y in Set(rects.map(\.rect.minY)) {
+            let reach = rects.filter { $0.rect.minY == y }.map(\.rect.maxX).max() ?? 0
+            #expect(abs(reach - 320) < 0.5, "the line at \(y) stops at \(reach)")
+        }
+        #expect(rects.count(where: \.containsStart) == 1)
+        let end = try #require(rects.first(where: \.containsEnd))
+        #expect(end.rect.maxX > 20 && end.rect.maxX < 160, "the end handle after 做完再说。: \(end.rect)")
+        let r = (v.text as NSString).range(of: "看表")
+        let word = try #require(v.position(from: v.beginningOfDocument, offset: r.location).flatMap { a in
+            v.position(from: a, offset: r.length).flatMap { v.textRange(from: a, to: $0) }
+        })
+        let one = v.selectionRects(for: word)
+        #expect(one.count == 1 && (one.first?.rect.minX ?? 1) < 0.5 && (one.first?.rect.maxX ?? 320) < 160, "\(one.map(\.rect))")
+    }
+
     /// Pixels with (nearly) full alpha: the words, not the faint rules and rows.
     private func ink(_ image: UIImage) throws -> Int {
         let cg = try #require(image.cgImage)
