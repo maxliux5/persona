@@ -140,13 +140,14 @@ struct ReplyTextTests {
             let reach = rects.filter { $0.rect.minY == y }.map(\.rect.maxX).max() ?? 0
             #expect(abs(reach - 320) < 0.5, "the line at \(y) stops at \(reach)")
         }
-        #expect(rects.count(where: \.containsStart) == 1)
-        let end = try #require(rects.first(where: \.containsEnd))
+        let starts = rects.filter(\.containsStart).count, ends = rects.filter(\.containsEnd)
+        #expect(starts == 1)
+        let end = try #require(ends.first)
         #expect(end.rect.maxX > 20 && end.rect.maxX < 160, "the end handle after 做完再说。: \(end.rect)")
         let r = (v.text as NSString).range(of: "看表")
-        let word = try #require(v.position(from: v.beginningOfDocument, offset: r.location).flatMap { a in
-            v.position(from: a, offset: r.length).flatMap { v.textRange(from: a, to: $0) }
-        })
+        let from = try #require(v.position(from: v.beginningOfDocument, offset: r.location))
+        let to = try #require(v.position(from: from, offset: r.length))
+        let word = try #require(v.textRange(from: from, to: to))
         let one = v.selectionRects(for: word)
         #expect(one.count == 1 && (one.first?.rect.minX ?? 1) < 0.5 && (one.first?.rect.maxX ?? 320) < 160, "\(one.map(\.rect))")
     }
