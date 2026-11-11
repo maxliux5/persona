@@ -14,19 +14,21 @@ import (
 // starts the accounts site's app registration, the user opens its page in Lark (or scans it from another device) and
 // confirms, and the answer carries the new app's credentials and the confirming person's open id. The credentials are
 // saved as if typed in, the app configured as after typing them, and that person becomes the owner: no pairing code.
-// The registration is kept in the settings (bots.feishu), so a manager restart between two polls loses nothing.
+// The registration is kept in the settings (bots.feishu), so a manager restart between two polls loses nothing; its
+// sealed parts are top-level fields there (FeishuBotSettings.RegistrationDeviceEnc / RegistrationSecretEnc), where the
+// key rotation re-seals them (db.sealedSettings).
 
 // botRegistration is a registration under way.
 type botRegistration struct {
-	Region        string    `json:"region"`          // "feishu" | "lark": whose accounts site is asked
-	DeviceCodeEnc string    `json:"device_code_enc"` // sealed: polling with it yields the app's secret
-	URL           string    `json:"url"`             // the page to open or scan
+	Region        string    `json:"region"` // "feishu" | "lark": whose accounts site is asked
+	DeviceCodeEnc string    `json:"-"`      // sealed: polling with it yields the app's secret (kept in RegistrationDeviceEnc)
+	URL           string    `json:"url"`    // the page to open or scan
 	Expires       time.Time `json:"expires"`
 	Interval      int       `json:"interval"` // seconds between polls
 	// Once confirmed, what the answer carried, kept until the bind is finished (a failed finish is tried again on
 	// the next poll instead of creating another app).
 	AppID     string `json:"app_id,omitempty"`
-	SecretEnc string `json:"secret_enc,omitempty"`
+	SecretEnc string `json:"-"` // sealed (kept in RegistrationSecretEnc)
 	OpenID    string `json:"open_id,omitempty"`
 }
 
@@ -62,7 +64,7 @@ func (h *Manager) beginFeishuRegistration(ctx context.Context, errText string) (
 	b := &h.bots
 	b.mu.Lock()
 	h.loadBotsLocked(ctx)
-	reg := b.set.Registration
+	reg := b.set.registration()
 	now := b.clock()
 	b.mu.Unlock()
 	if reg != nil && now.Before(reg.Expires) && errText == "" {
@@ -88,10 +90,27 @@ func (h *Manager) beginFeishuRegistration(ctx context.Context, errText string) (
 	return h.registerPrompt(ctx, next, errText), true
 }
 
+// registration is the registration under way with its sealed parts, nil when there is none.
+func (s FeishuBotSettings) registration() *botRegistration {
+	if s.Registration == nil {
+		return nil
+	}
+	r := *s.Registration
+	r.DeviceCodeEnc, r.SecretEnc = s.RegistrationDeviceEnc, s.RegistrationSecretEnc
+	return &r
+}
+
+// putRegistration keeps reg (nil: drops it), its sealed parts in the settings' top-level fields.
 func (h *Manager) putRegistration(reg *botRegistration) {
 	b := &h.bots
 	b.mu.Lock()
-	b.set.Registration = reg
+	b.set.Registration, b.set.RegistrationDeviceEnc, b.set.RegistrationSecretEnc = nil, "", ""
+	if reg != nil {
+		r := *reg
+		b.set.RegistrationDeviceEnc, b.set.RegistrationSecretEnc = r.DeviceCodeEnc, r.SecretEnc
+		r.DeviceCodeEnc, r.SecretEnc = "", ""
+		b.set.Registration = &r
+	}
 	h.saveBotSettingsLocked()
 	b.mu.Unlock()
 }
@@ -109,9 +128,10 @@ func (h *Manager) pollFeishuRegistration(ctx context.Context, credentials func(s
 	b.mu.Lock()
 	h.loadBotsLocked(ctx)
 	var reg botRegistration
-	live := b.set.Registration != nil
+	cur := b.set.registration()
+	live := cur != nil
 	if live {
-		reg = *b.set.Registration
+		reg = *cur
 	}
 	now := b.clock()
 	b.mu.Unlock()

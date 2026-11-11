@@ -102,6 +102,16 @@ func TestBotRegistrationCreatesTheAppAndPairsTheOwner(t *testing.T) {
 	if raw, _ := json.Marshal(p); strings.Contains(string(raw), "dc_secret") {
 		t.Fatalf("the device code reached the app: %s", raw)
 	}
+	// Sealed, and only in the top-level field the key rotation re-seals (db.sealedSettings).
+	w.h.bots.mu.Lock()
+	stored, _ := json.Marshal(w.h.bots.set)
+	sealed := w.h.bots.set.RegistrationDeviceEnc
+	w.h.bots.mu.Unlock()
+	var top map[string]json.RawMessage
+	_ = json.Unmarshal(stored, &top)
+	if sealed == "" || strings.Contains(string(stored), "dc_secret") || strings.Contains(string(top["registration"]), sealed) {
+		t.Fatalf("the device code is not sealed at the top level: %s", stored)
+	}
 	if p := w.bind(t, stepRegister); p["step"] != stepRegister || p["done"] != nil {
 		t.Fatalf("pending: %v", p)
 	}

@@ -53,6 +53,10 @@ type FeishuBotSettings struct {
 	Pairing        *botPairing `json:"pairing,omitempty"`
 	// Registration is an app registration under way (bots_register.go): binding in one authorization.
 	Registration *botRegistration `json:"registration,omitempty"`
+	// RegistrationDeviceEnc and RegistrationSecretEnc are the registration's device code and, once confirmed, the new
+	// app's secret, sealed with secret.key; top-level so the key rotation re-seals them (db.sealedSettings).
+	RegistrationDeviceEnc string `json:"registration_device_enc,omitempty"`
+	RegistrationSecretEnc string `json:"registration_secret_enc,omitempty"`
 	// TopicChats are the group chats the owner opted in (bots_topics.go): their messages reach the assistant, and the
 	// bot may send into them. The owner's own list: it goes when the owner does.
 	TopicChats []BotChat `json:"topic_chats,omitempty"`
