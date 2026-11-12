@@ -12,6 +12,12 @@ const calls = vi.hoisted(() => ({ status: [] as Call[], update: [] as (Call & { 
 const connectorList = vi.hoisted(() => ({ value: [] as HubConnector[], calls: 0 }));
 const connectorLogin = vi.hoisted(() => vi.fn());
 const setConnector = vi.hoisted(() => vi.fn());
+const bindChannel = vi.hoisted(() => vi.fn());
+vi.mock("../../lib/channels", async (original) => ({
+  ...(await original<typeof import("../../lib/channels")>()),
+  bindChannel: (...args: unknown[]) => bindChannel(...args),
+  forgetChannels: () => {},
+}));
 vi.mock("../../lib/feishu-bot", async (original) => ({
   ...(await original<typeof import("../../lib/feishu-bot")>()),
   botStatus: () => new Promise<FeishuBotStatus>((resolve) => calls.status.push({ resolve })),
@@ -62,6 +68,12 @@ const type = (label: string, value: string) =>
     el.dispatchEvent(new Event("input", { bubbles: true }));
   });
 const switches = () => [...document.body.querySelectorAll<HTMLButtonElement>('[role="switch"]')];
+// The credentials form is folded under Advanced (#5818): open it before reading or typing in it.
+const advancedToggle = () =>
+  [...document.body.querySelectorAll<HTMLButtonElement>("button[aria-expanded]")].find((b) =>
+    [t("settings-feishubot.advanced_other_app"), t("settings-feishubot.advanced_have_app")].includes(b.textContent ?? ""),
+  );
+const advanced = () => act(async () => advancedToggle()!.click());
 
 // Draws the row, answers its status read, and opens the dialog.
 async function open(status: FeishuBotStatus) {
@@ -77,6 +89,7 @@ beforeEach(() => {
   connectorList.calls = 0;
   connectorLogin.mockReset();
   setConnector.mockReset();
+  bindChannel.mockReset();
   visibility = "visible";
   Object.defineProperty(document, "visibilityState", { configurable: true, get: () => visibility });
   host = document.createElement("div");
@@ -152,15 +165,22 @@ describe("Feishu bot dialog", () => {
     expect([...row.querySelectorAll<HTMLElement>("*")].some((element) => element.classList.contains("bg-orange-tint"))).toBe(true);
   });
 
-  it("orders credentials, read-as-me, then the bot's controls", async () => {
+  it("orders read-as-me, then the bot's controls, with the credentials folded under Advanced last", async () => {
     const larkcli: HubConnector = { id: "larkcli", name: "Lark via lark-cli", status: "ok", account: "me", capabilities: ["login"] };
     act(() => root.render(<FeishuBot larkcli={larkcli} />));
     await act(async () => calls.status[0].resolve(saved({ owner: { name: "owner", paired_at: 1 } })));
     await act(async () => host.querySelector<HTMLButtonElement>("button")!.click());
 
-    const headings = [...document.querySelectorAll<HTMLElement>("[role=dialog] section h2")].map((x) => x.textContent);
-    expect(headings.indexOf(t("settings-feishubot.credentials"))).toBeLessThan(headings.indexOf(t("settings-feishubot.read_section")));
-    expect(headings.indexOf(t("settings-feishubot.read_section"))).toBeLessThan(headings.indexOf(t("settings-feishubot.bot_section")));
+    const headings = () => [...document.querySelectorAll<HTMLElement>("[role=dialog] section h2")].map((x) => x.textContent);
+    expect(headings()).not.toContain(t("settings-feishubot.credentials"));
+    expect(headings().indexOf(t("settings-feishubot.read_section"))).toBeGreaterThanOrEqual(0);
+    expect(headings().indexOf(t("settings-feishubot.read_section"))).toBeLessThan(headings().indexOf(t("settings-feishubot.bot_section")));
+    // An app is bound: no create step, and Advanced offers another app, folded.
+    expect(document.body.textContent).not.toContain(t("settings-feishubot.create_start"));
+    expect(advancedToggle()?.textContent).toBe(t("settings-feishubot.advanced_other_app"));
+    expect(advancedToggle()?.getAttribute("aria-expanded")).toBe("false");
+    await advanced();
+    expect(headings().indexOf(t("settings-feishubot.bot_section"))).toBeLessThan(headings().indexOf(t("settings-feishubot.credentials")));
     // Signed in: the section is titled for the identity, and signing in again is the quiet secondary action.
     const dialog = document.querySelector<HTMLElement>("[role=dialog]")!;
     expect(dialog.textContent).toContain(t("settings-feishubot.read_as_you"));
@@ -314,6 +334,7 @@ describe("Feishu bot dialog", () => {
     history.replaceState(null, "", "?tab=connectors&connector=feishu-bot");
     try {
       act(() => root.render(<FeishuBot larkcli={null} />));
+      await advanced();
       expect(input("App ID").value).toBe("");
       await act(async () => calls.status[0].resolve(saved()));
       expect(input("App ID").value).toBe("cli_saved");
@@ -324,6 +345,7 @@ describe("Feishu bot dialog", () => {
 
   it("keeps a typed App ID when a feature switch is flipped", async () => {
     await open(saved());
+    await advanced();
     type("App ID", "cli_typed");
     // The enable switch comes first, then one switch per feature.
     await act(async () => switches()[2].click());
@@ -412,6 +434,7 @@ describe("Feishu bot dialog", () => {
 
   it("keeps a typed App ID when the bot is switched off", async () => {
     await open(saved());
+    await advanced();
     type("App ID", "cli_typed");
     await act(async () => switches()[0].click());
     expect(calls.update[0].body).toEqual({ enabled: false });
@@ -422,6 +445,7 @@ describe("Feishu bot dialog", () => {
   it("keeps a typed App Secret while the pairing poll answers", async () => {
     vi.useFakeTimers();
     await open(saved({ pairing: { code: "123456", expires_at: Math.floor(Date.now() / 1000) + 600 } }));
+    await advanced();
     type("App Secret", "typed-secret");
     await act(async () => void vi.advanceTimersByTime(3000));
     expect(calls.status).toHaveLength(2);
@@ -445,6 +469,7 @@ describe("Feishu bot dialog", () => {
 
   it("takes the hub's answer after verify and save", async () => {
     await open(saved());
+    await advanced();
     type("App ID", " cli_new ");
     type("App Secret", "new-secret");
     const save = [...document.body.querySelectorAll<HTMLButtonElement>("button")].find((b) => b.textContent === t("settings-feishubot.verify_save"));
@@ -468,8 +493,31 @@ describe("Feishu bot dialog", () => {
     expect(select().value).toBe("0");
   });
 
+  it("with no app, starts with scanning to create one, the credentials folded under Advanced (#5818)", async () => {
+    const noApp = saved({ app_id: "", has_secret: false, connected: false });
+    await open(noApp);
+    const dialog = document.querySelector<HTMLElement>("[role=dialog]")!;
+    const start = [...dialog.querySelectorAll<HTMLButtonElement>("button")].find((b) => b.textContent === t("settings-feishubot.create_start"));
+    expect(start).toBeDefined();
+    expect(dialog.textContent).toContain(t("settings-feishubot.create_footer"));
+    expect(input("App ID")).toBeNull();
+    expect(advancedToggle()?.textContent).toBe(t("settings-feishubot.advanced_have_app"));
+
+    // The press is the channel's bind step: the hub begins the app registration and answers with a QR code.
+    bindChannel.mockResolvedValueOnce({ step: "register", kind: "qr", url: "https://accounts.example.com/verify", interval: 5, qr: { size: 2, rows: ["10", "01"] } });
+    await act(async () => start!.click());
+    expect(bindChannel).toHaveBeenCalledWith("feishu", "", {});
+    expect(dialog.querySelector(`svg[role=img][aria-label="${t("settings-channels.qr_label")}"]`)).not.toBeNull();
+  });
+
+  it("keeps manager.json's credentials: no create step when the app comes from the config", async () => {
+    await open(saved({ app_id: "", has_secret: false, from_config: true }));
+    expect(document.body.textContent).not.toContain(t("settings-feishubot.create_start"));
+  });
+
   it("fills the form from a switch's answer when nothing was typed", async () => {
     await open(saved());
+    await advanced();
     await act(async () => switches()[0].click());
     await act(async () => calls.update[0].resolve(saved({ enabled: false, app_id: "cli_elsewhere" })));
     expect(input("App ID").value).toBe("cli_elsewhere");
