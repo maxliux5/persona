@@ -64,7 +64,9 @@ The two complement each other and have separate switches.
   **Scan to create with Lark** button that sends the channel's bind step (`POST /api/v1/channels/feishu/bind`) and draws the QR step
   Settings › Channels draws, so both places run one flow. The credentials form and the manual steps sit under a folded
   **Already have a Lark app?** (no app) or **Advanced: use another Lark app** (an app bound); with credentials from `manager.json` there is no
-  create step.
+  create step. When the dialog also shows reading Lark as you (`larkcli`) and lark-cli follows the bot's app with none of its own,
+  that section says to create the app above first instead of offering an authorization that cannot work; once the scan is
+  confirmed, the authorization starts by itself and shows its own QR code, so setting up both is two scans on one page.
 - Pairing (an app whose credentials were typed in): tap **Pair** in the App to get a 6-digit code (valid for 10 minutes) and send it to the bot in Lark; whoever sends it becomes the owner (its open_id and the DM's chat_id are recorded).
   When not paired, DMing it returns instructions on how to pair; 5 wrong guesses void the code, and you have to get a new one. Changing the App ID means pairing again (it's a different bot).
 - Names: reading contacts needs `contact:user.base:readonly`; without that permission the owner is called by `assistant.owner` in the manager's `manager.json`, and others "someone".

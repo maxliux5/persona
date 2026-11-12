@@ -153,6 +153,8 @@ function FeishuBotDialog({ bot, larkcli, onClose, onOpen }: { bot: ReturnType<ty
   const [confirmUnpair, setConfirmUnpair] = useState(false);
   // The credentials form and the manual steps: for an app of your own, folded until asked for.
   const [advanced, setAdvanced] = useState(false);
+  // The app was just created here by scanning: reading Lark as you is the next step, started without another press.
+  const [created, setCreated] = useState(false);
   const [now, setNow] = useState(() => Date.now());
   const changed = credentialsChanged(status, form);
   const pairing = livePairing(status, now);
@@ -265,7 +267,10 @@ function FeishuBotDialog({ bot, larkcli, onClose, onOpen }: { bot: ReturnType<ty
           title={t("settings-feishubot.create_title")}
           footer={t(dialogLarkcli ? "settings-feishubot.create_footer_shared" : "settings-feishubot.create_footer")}
           startLabel={t("settings-feishubot.create_start")}
-          onDone={reloadAll}
+          onDone={async () => {
+            await reloadAll();
+            setCreated(true);
+          }}
         />
       )}
 
@@ -273,6 +278,9 @@ function FeishuBotDialog({ bot, larkcli, onClose, onOpen }: { bot: ReturnType<ty
         <LarkReadSection
           connector={dialogLarkcli}
           status={status}
+          // lark-cli follows the bot's app, and there is none yet, nor one of lark-cli's own: create it above first.
+          waitsForApp={noApp && status?.larkcli?.mode === "default" && !status.larkcli.app_id}
+          autoStart={created && dialogLarkcli.status !== "ok"}
           reload={reloadAll}
           onOpen={() => {
             onClose();
@@ -460,7 +468,14 @@ function FeishuBotDialog({ bot, larkcli, onClose, onOpen }: { bot: ReturnType<ty
   );
 }
 
-function LarkReadSection({ connector, status, reload, onOpen }: { connector: HubConnector; status: FeishuBotStatus | null; reload: () => Promise<void>; onOpen: () => void }) {
+function LarkReadSection({ connector, status, waitsForApp, autoStart, reload, onOpen }: {
+  connector: HubConnector;
+  status: FeishuBotStatus | null;
+  waitsForApp?: boolean;
+  autoStart?: boolean;
+  reload: () => Promise<void>;
+  onOpen: () => void;
+}) {
   const [rechecking, setRechecking] = useState(false);
   const [switching, setSwitching] = useState(false);
   const on = isEnabled(connector);
@@ -568,9 +583,11 @@ function LarkReadSection({ connector, status, reload, onOpen }: { connector: Hub
           </div>
         </div>
       )}
-      {signsInHere(connector) && (
+      {waitsForApp ? (
+        <p className="border-t border-line px-4 py-2.5 text-[12.5px] leading-relaxed text-ink-3">{t("settings-feishubot.read_needs_app")}</p>
+      ) : signsInHere(connector) && (
         // Signed in: signing in again is a quiet secondary action; otherwise it is what this section is for.
-        <SignInSteps c={connector} reload={reload} startLabel={t(connector.status === "ok" ? "settings-feishubot.read_reauthorize" : "settings-feishubot.read_authorize")} startTone={connector.status === "ok" ? "quiet" : "accent"} bare />
+        <SignInSteps c={connector} reload={reload} autoStart={autoStart} startLabel={t(connector.status === "ok" ? "settings-feishubot.read_reauthorize" : "settings-feishubot.read_authorize")} startTone={connector.status === "ok" ? "quiet" : "accent"} bare />
       )}
       {profile && editingProfile && profile.mode !== "config" && (
         <Row label={t("settings-feishubot.larkcli_profile_title")}>

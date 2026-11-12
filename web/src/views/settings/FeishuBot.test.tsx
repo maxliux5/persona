@@ -231,6 +231,45 @@ describe("Feishu bot dialog", () => {
     expect(document.body.textContent).toContain("ABC123");
   });
 
+  it("draws the device-code step's QR code when the hub sends one, the link kept as the secondary way (#5818)", async () => {
+    const larkcli: HubConnector = { id: "larkcli", name: "Lark via lark-cli", status: "not_signed_in", capabilities: ["login"] };
+    connectorLogin.mockResolvedValue({
+      step: "device", kind: "device_code", user_code: "ABC123", url: "https://example.test/authorize?user_code=ABC123", qr: { size: 2, rows: ["10", "01"] },
+    });
+    act(() => root.render(<FeishuBot larkcli={larkcli} />));
+    await act(async () => calls.status[0].resolve(saved({ owner: { name: "owner", paired_at: 1 } })));
+    await act(async () => host.querySelector<HTMLButtonElement>("button")!.click());
+    const authorize = [...document.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent?.includes(t("settings-feishubot.read_authorize")))!;
+    await act(async () => authorize.click());
+
+    const dialog = document.querySelector<HTMLElement>("[role=dialog]")!;
+    expect(dialog.querySelector(`svg[role=img][aria-label="${t("settings-hubconnector.qr_label")}"]`)).not.toBeNull();
+    expect(dialog.textContent).toContain(t("settings-hubconnector.scan_to_authorize"));
+    expect(dialog.textContent).toContain("ABC123");
+  });
+
+  it("with no app anywhere, reading Lark waits for the app; once it is created, authorizing starts by itself (#5818)", async () => {
+    const larkcli: HubConnector = { id: "larkcli", name: "Lark via lark-cli", status: "not_signed_in", capabilities: ["login"] };
+    connectorList.value = [larkcli];
+    const larkcliStatus = (over: object) => ({ profile: "", same_app: false, mode: "default" as const, choice: "", profiles: [], ...over });
+    act(() => root.render(<FeishuBot larkcli={larkcli} />));
+    await act(async () => calls.status[0].resolve(saved({ app_id: "", has_secret: false, connected: false, larkcli: larkcliStatus({}) })));
+    await act(async () => host.querySelector<HTMLButtonElement>("button")!.click());
+    const dialog = document.querySelector<HTMLElement>("[role=dialog]")!;
+    expect(dialog.textContent).toContain(t("settings-feishubot.read_needs_app"));
+    expect([...dialog.querySelectorAll("button")].some((b) => b.textContent?.includes(t("settings-feishubot.read_authorize")))).toBe(false);
+
+    // The scan is confirmed: the bot has its app, lark-cli follows it, and the authorization starts without a press.
+    bindChannel.mockResolvedValueOnce({ done: true, account: "owner" });
+    connectorLogin.mockResolvedValue({ step: "device", kind: "device_code", user_code: "ABC123", url: "https://example.test/authorize?user_code=ABC123" });
+    const start = [...dialog.querySelectorAll<HTMLButtonElement>("button")].find((b) => b.textContent === t("settings-feishubot.create_start"))!;
+    await act(async () => start.click());
+    await act(async () => calls.status[1].resolve(saved({ owner: { name: "owner", paired_at: 1 }, larkcli: larkcliStatus({ mode: "bot", app_id: "cli_saved", same_app: true }) })));
+    expect(dialog.textContent).not.toContain(t("settings-feishubot.read_needs_app"));
+    expect(connectorLogin).toHaveBeenCalledWith("larkcli", "", {});
+    expect(dialog.textContent).toContain("ABC123");
+  });
+
   it("opens the permission URL when lark-cli scopes are missing", async () => {
     const open = vi.spyOn(window, "open").mockImplementation(() => null);
     const larkcli: HubConnector = {
