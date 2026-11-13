@@ -4,19 +4,22 @@ package assistant
 // step P0, docs/design/proposals/assistant-instructions.md 4a). The shared instructions, the MCP tool descriptions
 // and the supervision events grow one rule at a time, and nothing stops a removed manual from coming back; this
 // test makes growth a visible decision. It measures the UTF-8 size of every watched piece, compares it with the
-// baseline in testdata/prompt_sizes.json and fails when a piece grows past it. Like the Apple token ratchet
-// (apple/PersonaTests TokenRatchetTests) the baseline only goes down: a rule that has to grow is shortened or moved
-// elsewhere first, and a shrink lowers the baseline in the same PR by running
+// baseline in testdata/prompt_sizes.json and fails when a piece grows past it. The baseline's total only goes
+// down, like the Apple token ratchet (apple/PersonaTests TokenRatchetTests): a rule that has to grow is shortened
+// or moved elsewhere first. A single piece may still grow when text moves between prompts and the total falls by
+// more (a move into the shared instructions shrinks the goldens it came from); such a PR says where the text moved
+// to. After a shrink or such a move, lower the baseline in the same PR by running
 //
 //	PROMPT_SIZE_UPDATE=1 go test ./internal/assistant -run PromptSizeRatchet
 //
-// which also adds new keys and drops removed ones, but refuses to write a raised value.
+// which also adds new keys and drops removed ones, but refuses to write a larger total.
 
 import (
 	"bytes"
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strings"
 	"testing"
@@ -122,6 +125,42 @@ func promptSizePieces(t *testing.T) map[string]int {
 	return sizes
 }
 
+// promptSizeChange is one baseline entry that grew, with its old and new size in bytes.
+type promptSizeChange struct {
+	key      string
+	from, to int
+}
+
+// promptSizeVerdict is whether the baseline may be rewritten for the measured sizes, with the entries that grew
+// and the two totals the decision was made on.
+type promptSizeVerdict struct {
+	accept                      bool
+	raised                      []promptSizeChange
+	baselineTotal, currentTotal int
+}
+
+// decidePromptSizeUpdate reports whether the baseline may be rewritten for the measured sizes: yes when the total
+// does not grow, so text can move between entries (one rises while others fall by more, as when a rule leaves the
+// supervision events for the shared instructions), no when the total grows. The totals are the sums over the whole
+// maps, so a new entry counts against the baseline and a removed one stops counting.
+func decidePromptSizeUpdate(baseline, current map[string]int) promptSizeVerdict {
+	verdict := promptSizeVerdict{}
+	for _, size := range baseline {
+		verdict.baselineTotal += size
+	}
+	for _, size := range current {
+		verdict.currentTotal += size
+	}
+	for key, from := range baseline {
+		if to, ok := current[key]; ok && to > from {
+			verdict.raised = append(verdict.raised, promptSizeChange{key: key, from: from, to: to})
+		}
+	}
+	sort.Slice(verdict.raised, func(i, j int) bool { return verdict.raised[i].key < verdict.raised[j].key })
+	verdict.accept = verdict.currentTotal <= verdict.baselineTotal
+	return verdict
+}
+
 func TestPromptSizeRatchet(t *testing.T) {
 	baseline := map[string]int{}
 	if raw, err := os.ReadFile(promptSizeBaseline); err == nil {
@@ -134,25 +173,27 @@ func TestPromptSizeRatchet(t *testing.T) {
 	current := promptSizePieces(t)
 
 	if os.Getenv("PROMPT_SIZE_UPDATE") != "" {
-		refused := false
-		for key, old := range baseline {
-			if cur, ok := current[key]; ok && cur > old {
-				t.Errorf("%s grew from %d to %d bytes; the baseline only goes down: shorten or move text elsewhere first, then update it", key, old, cur)
-				refused = true
+		verdict := decidePromptSizeUpdate(baseline, current)
+		if !verdict.accept {
+			for _, r := range verdict.raised {
+				t.Errorf("%s grew from %d to %d bytes", r.key, r.from, r.to)
 			}
+			t.Fatalf("not rewriting %s: the total grew from %d to %d bytes; the total only goes down",
+				promptSizeBaseline, verdict.baselineTotal, verdict.currentTotal)
 		}
-		if refused {
-			t.Fatalf("not rewriting %s", promptSizeBaseline)
+		for _, r := range verdict.raised {
+			t.Logf("raised %s from %d to %d bytes (moved text; total went from %d to %d)",
+				r.key, r.from, r.to, verdict.baselineTotal, verdict.currentTotal)
 		}
 		added, removed, lowered := 0, 0, 0
-		for key, cur := range current {
-			switch old, ok := baseline[key]; {
+		for key, to := range current {
+			switch from, ok := baseline[key]; {
 			case !ok:
 				added++
-				t.Logf("added %s at %d bytes", key, cur)
-			case cur < old:
+				t.Logf("added %s at %d bytes", key, to)
+			case to < from:
 				lowered++
-				t.Logf("lowered %s from %d to %d bytes", key, old, cur)
+				t.Logf("lowered %s from %d to %d bytes", key, from, to)
 			}
 		}
 		for key := range baseline {
@@ -168,8 +209,8 @@ func TestPromptSizeRatchet(t *testing.T) {
 		if err := os.WriteFile(promptSizeBaseline, append(out, '\n'), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		t.Logf("rewrote %s: %d entries (%d added, %d removed, %d lowered); read the diff before committing it",
-			promptSizeBaseline, len(current), added, removed, lowered)
+		t.Logf("rewrote %s: %d entries (%d added, %d removed, %d lowered, %d raised by a move), total %d -> %d bytes; read the diff before committing it",
+			promptSizeBaseline, len(current), added, removed, lowered, len(verdict.raised), verdict.baselineTotal, verdict.currentTotal)
 		return
 	}
 
@@ -193,9 +234,49 @@ func TestPromptSizeRatchet(t *testing.T) {
 		case !inBaseline:
 			t.Errorf("%s is new at %d bytes; PROMPT_SIZE_UPDATE=1 go test ./internal/assistant -run PromptSizeRatchet adds it", key, cur)
 		case cur > old:
-			t.Errorf("%s grew from %d to %d bytes; the baseline only goes down: shorten or move text elsewhere first, then update it", key, old, cur)
+			t.Errorf("%s grew from %d to %d bytes; growth is decided when the baseline is updated, never slipped in: when moving text between prompts, PROMPT_SIZE_UPDATE=1 go test ./internal/assistant -run PromptSizeRatchet accepts it as long as the total goes down", key, old, cur)
 		case cur < old:
 			t.Logf("%s shrank from %d to %d bytes; PROMPT_SIZE_UPDATE=1 go test ./internal/assistant -run PromptSizeRatchet lowers the baseline", key, old, cur)
+		}
+	}
+}
+
+func TestDecidePromptSizeUpdate(t *testing.T) {
+	cases := []struct {
+		name                        string
+		baseline, current           map[string]int
+		accept                      bool
+		raised                      []string
+		baselineTotal, currentTotal int
+	}{
+		{"all shrink", map[string]int{"a": 100, "b": 50}, map[string]int{"a": 90, "b": 40}, true, nil, 150, 130},
+		{"a move: one rises, another falls by more", map[string]int{"a": 100, "b": 200}, map[string]int{"a": 110, "b": 150},
+			true, []string{"a"}, 300, 260},
+		{"one rises and the total grows", map[string]int{"a": 100, "b": 50}, map[string]int{"a": 160, "b": 50},
+			false, []string{"a"}, 150, 210},
+		{"a new key grows the total", map[string]int{"a": 100}, map[string]int{"a": 100, "c": 50}, false, nil, 100, 150},
+		{"a removed key shrinks the total", map[string]int{"a": 100, "b": 50}, map[string]int{"a": 100}, true, nil, 150, 100},
+		{"a move that keeps the total", map[string]int{"a": 100, "b": 100}, map[string]int{"a": 120, "b": 80},
+			true, []string{"a"}, 200, 200},
+	}
+	for _, c := range cases {
+		verdict := decidePromptSizeUpdate(c.baseline, c.current)
+		if verdict.accept != c.accept {
+			t.Errorf("%s: accept = %v, want %v", c.name, verdict.accept, c.accept)
+		}
+		if verdict.baselineTotal != c.baselineTotal || verdict.currentTotal != c.currentTotal {
+			t.Errorf("%s: totals = %d -> %d, want %d -> %d", c.name,
+				verdict.baselineTotal, verdict.currentTotal, c.baselineTotal, c.currentTotal)
+		}
+		var raised []string
+		for _, r := range verdict.raised {
+			raised = append(raised, r.key)
+			if r.to <= r.from {
+				t.Errorf("%s: raised entry %s must grow, got %d -> %d", c.name, r.key, r.from, r.to)
+			}
+		}
+		if !reflect.DeepEqual(raised, c.raised) {
+			t.Errorf("%s: raised = %v, want %v", c.name, raised, c.raised)
 		}
 	}
 }
