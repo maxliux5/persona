@@ -6,12 +6,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"os"
 	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -29,7 +31,8 @@ import (
 //
 //	PERSONA_LIVE_AI='{"base_url":"…","api_key_file":"…","model":"…"}' go test -run SupervisionBehaviourLive -v -count=1 ./internal/assistant
 //
-// It runs every case PERSONA_LIVE_RUNS times (default 5) and prints passes per case. Run it before and after a change
+// It runs every case PERSONA_LIVE_RUNS times (default 5, PERSONA_LIVE_PARALLEL at a time, default 4) and prints passes
+// per case and what the runs spent. Run it before and after a change
 // to supervision prompts or the instructions and put both tables in the PR; a case that passes fewer runs after the
 // change blocks it (the pass bar in the proposal's section 6).
 //
@@ -272,48 +275,89 @@ func TestSupervisionBehaviourLive(t *testing.T) {
 	if cfg.API != "" && cfg.API != "messages" {
 		t.Skipf("the behaviour runner speaks the Messages API, not %q", cfg.API)
 	}
-	runs := 5
+	runs, parallel := 5, 4
 	if n, err := strconv.Atoi(os.Getenv("PERSONA_LIVE_RUNS")); err == nil && n > 0 {
 		runs = n
 	}
+	if n, err := strconv.Atoi(os.Getenv("PERSONA_LIVE_PARALLEL")); err == nil && n > 0 {
+		parallel = n
+	}
 	only := os.Getenv("PERSONA_LIVE_CASE")
 	tools := behaviourTools(t)
-	var rows []string
-	total, passed := 0, 0
+	var cases []behaviourCase
 	for _, c := range loadBehaviourCases(t) {
-		if only != "" && c.Name != only {
-			continue
+		if only == "" || c.Name == only {
+			cases = append(cases, c)
 		}
+	}
+	type outcome struct {
+		calls []behaviourCall
+		miss  []string
+		usage behaviourUsage
+	}
+	results := make([][]outcome, len(cases))
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	slots := make(chan struct{}, parallel)
+	for ci, c := range cases {
+		results[ci] = make([]outcome, runs)
 		system, event := behaviourGolden(t, c.System), behaviourGolden(t, c.Event)
+		for r := range runs {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				slots <- struct{}{}
+				defer func() { <-slots }()
+				calls, usage, err := runBehaviour(cfg, system, event, tools, c.Results)
+				miss := c.misses(calls)
+				if err != nil {
+					miss = append(miss, "error: "+err.Error())
+				}
+				mu.Lock()
+				results[ci][r] = outcome{calls, miss, usage}
+				mu.Unlock()
+			}()
+		}
+	}
+	wg.Wait()
+	var rows []string
+	var spent behaviourUsage
+	total, passed := 0, 0
+	for ci, c := range cases {
 		ok, last := 0, ""
-		for range runs {
-			calls, err := runBehaviour(t, cfg, system, event, tools, c.Results)
-			miss := c.misses(calls)
-			if err != nil {
-				miss = append(miss, "error: "+err.Error())
-			}
-			if len(miss) == 0 {
-				ok++
-			} else {
-				last = strings.Join(miss, "; ")
-			}
-			names := make([]string, len(calls))
-			for i, call := range calls {
+		for _, o := range results[ci] {
+			spent = spent.add(o.usage)
+			names := make([]string, len(o.calls))
+			for i, call := range o.calls {
 				names[i] = call.Tool
 			}
-			t.Logf("%s: %s %v", c.Name, map[bool]string{true: "ok  ", false: "MISS"}[len(miss) == 0], names)
+			if len(o.miss) == 0 {
+				ok++
+			} else {
+				last = strings.Join(o.miss, "; ")
+			}
+			t.Logf("%s: %s %v", c.Name, map[bool]string{true: "ok  ", false: "MISS"}[len(o.miss) == 0], names)
 		}
 		total += runs
 		passed += ok
 		rows = append(rows, fmt.Sprintf("%-48s %d/%d  %s", c.Name, ok, runs, last))
 	}
-	t.Logf("supervision behaviour on %s: %d of %d runs as expected\n%s", cfg.Model, passed, total, strings.Join(rows, "\n"))
+	t.Logf("supervision behaviour on %s: %d of %d runs as expected; %d model calls, input %d, cache write %d, cache read %d, output %d\n%s",
+		cfg.Model, passed, total, spent.Calls, spent.Input, spent.CacheWrite, spent.CacheRead, spent.Output, strings.Join(rows, "\n"))
+}
+
+// behaviourUsage is what the runs spent, as the upstream reported it.
+type behaviourUsage struct{ Calls, Input, CacheWrite, CacheRead, Output int }
+
+func (u behaviourUsage) add(v behaviourUsage) behaviourUsage {
+	return behaviourUsage{u.Calls + v.Calls, u.Input + v.Input, u.CacheWrite + v.CacheWrite, u.CacheRead + v.CacheRead, u.Output + v.Output}
 }
 
 // runBehaviour plays one case against the model: the event as the first message, canned results for its tool calls,
-// until it stops calling tools or after 12 model calls. It returns every tool call in order.
-func runBehaviour(t *testing.T, cfg ai.Config, system, event string, tools []map[string]any, results map[string]string) ([]behaviourCall, error) {
-	t.Helper()
+// until it stops calling tools or after 12 model calls. It returns every tool call in order. The system prompt and the
+// tool list are marked for prompt caching, as Claude Code does, so repeated runs pay for them once.
+func runBehaviour(cfg ai.Config, system, event string, tools []map[string]any, results map[string]string) ([]behaviourCall, behaviourUsage, error) {
+	var spent behaviourUsage
 	key := cfg.APIKey
 	if key == "" {
 		path := cfg.APIKeyFile
@@ -323,7 +367,7 @@ func runBehaviour(t *testing.T, cfg ai.Config, system, event string, tools []map
 		}
 		b, err := os.ReadFile(path)
 		if err != nil {
-			return nil, err
+			return nil, spent, err
 		}
 		key = strings.TrimSpace(string(b))
 	}
@@ -331,15 +375,20 @@ func runBehaviour(t *testing.T, cfg ai.Config, system, event string, tools []map
 	if !strings.HasSuffix(base, "/v1") {
 		base += "/v1"
 	}
+	cached := slices.Clone(tools)
+	last := maps.Clone(cached[len(cached)-1])
+	last["cache_control"] = map[string]any{"type": "ephemeral"}
+	cached[len(cached)-1] = last
+	systemBlocks := []map[string]any{{"type": "text", "text": system, "cache_control": map[string]any{"type": "ephemeral"}}}
 	messages := []map[string]any{{"role": "user", "content": event}}
 	var calls []behaviourCall
 	for range 12 {
-		body := map[string]any{"model": cfg.Model, "max_tokens": 4096, "system": system, "tools": tools, "messages": messages}
+		body := map[string]any{"model": cfg.Model, "max_tokens": 4096, "system": systemBlocks, "tools": cached, "messages": messages}
 		if cfg.ReasoningEffort != "" {
 			body["output_config"] = map[string]any{"effort": cfg.ReasoningEffort}
 		}
 		b, _ := json.Marshal(body)
-		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 		req, _ := http.NewRequestWithContext(ctx, "POST", base+"/messages", bytes.NewReader(b))
 		req.Header.Set("content-type", "application/json")
 		req.Header.Set("anthropic-version", "2023-06-01")
@@ -351,21 +400,28 @@ func runBehaviour(t *testing.T, cfg ai.Config, system, event string, tools []map
 		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
 			cancel()
-			return calls, err
+			return calls, spent, err
 		}
 		raw, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
 		cancel()
 		if resp.StatusCode != 200 {
-			return calls, fmt.Errorf("status %d: %.300s", resp.StatusCode, raw)
+			return calls, spent, fmt.Errorf("status %d: %.300s", resp.StatusCode, raw)
 		}
 		var reply struct {
 			Content    []map[string]any `json:"content"`
 			StopReason string           `json:"stop_reason"`
+			Usage      struct {
+				Input      int `json:"input_tokens"`
+				CacheWrite int `json:"cache_creation_input_tokens"`
+				CacheRead  int `json:"cache_read_input_tokens"`
+				Output     int `json:"output_tokens"`
+			} `json:"usage"`
 		}
 		if err := json.Unmarshal(raw, &reply); err != nil {
-			return calls, err
+			return calls, spent, err
 		}
+		spent = spent.add(behaviourUsage{1, reply.Usage.Input, reply.Usage.CacheWrite, reply.Usage.CacheRead, reply.Usage.Output})
 		messages = append(messages, map[string]any{"role": "assistant", "content": reply.Content})
 		var outs []map[string]any
 		for _, block := range reply.Content {
@@ -382,9 +438,9 @@ func runBehaviour(t *testing.T, cfg ai.Config, system, event string, tools []map
 			outs = append(outs, map[string]any{"type": "tool_result", "tool_use_id": block["id"], "content": result})
 		}
 		if len(outs) == 0 {
-			return calls, nil
+			return calls, spent, nil
 		}
 		messages = append(messages, map[string]any{"role": "user", "content": outs})
 	}
-	return calls, nil
+	return calls, spent, nil
 }
