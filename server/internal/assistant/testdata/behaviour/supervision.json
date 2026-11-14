@@ -88,7 +88,7 @@
   },
   {
     "name": "parked_task_is_not_left_as_is",
-    "why": "A parked task that comes back is decided again: parked with a reason, a decision for the owner, or closed.",
+    "why": "A parked task that comes back is decided again: parked with a reason, a decision for the owner, or closed; one whose parks ran out is decided or closed, never parked again.",
     "system": "assistant_claude_md.full",
     "event": "supervise.parked_due",
     "results": {
@@ -97,8 +97,17 @@
       "task_review": "{\"ok\":true}"
     },
     "expect": [
-      {"tool": "task_review", "args": {"todo_id": "todo_1"}},
-      {"tool": "task_review", "args": {"todo_id": "todo_2"}}
+      {"tool": "task_review", "args": {"todo_id": "todo_1"}}
+    ],
+    "any_of": [
+      [
+        {"tool": "task_review", "args": {"todo_id": "todo_2", "verdict": "accepted"}},
+        {"tool": "task_review", "args": {"todo_id": "todo_2", "verdict": "cancelled"}},
+        {"tool": "task_review", "args": {"todo_id": "todo_2", "verdict": "needs_user"}}
+      ]
+    ],
+    "forbid": [
+      {"tool": "task_review", "args": {"todo_id": "todo_2", "verdict": "parked"}}
     ]
   },
   {

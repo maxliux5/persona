@@ -193,6 +193,32 @@ func TestSupervisionBehaviourChecks(t *testing.T) {
 	if !(behaviourMatch{Tool: "interaction_answer", Args: map[string]string{"answers": "feat/x"}}).matches(answer) {
 		t.Error("an argument's JSON should match by substring")
 	}
+	// The parked case's shape: a task out of parks must be decided or closed, and a further
+	// parked verdict on it is itself a miss, not a satisfying task_review.
+	parked := behaviourCase{
+		Expect: []behaviourMatch{{Tool: "task_review", Args: map[string]string{"todo_id": "t1"}}},
+		AnyOf: [][]behaviourMatch{{
+			{Tool: "task_review", Args: map[string]string{"todo_id": "t2", "verdict": "accepted"}},
+			{Tool: "task_review", Args: map[string]string{"todo_id": "t2", "verdict": "cancelled"}},
+			{Tool: "task_review", Args: map[string]string{"todo_id": "t2", "verdict": "needs_user"}},
+		}},
+		Forbid: []behaviourMatch{{Tool: "task_review", Args: map[string]string{"todo_id": "t2", "verdict": "parked"}}},
+	}
+	first := behaviourCall{Tool: "task_review", Args: map[string]any{"todo_id": "t1", "verdict": "parked"}}
+	decided := behaviourCall{Tool: "task_review", Args: map[string]any{"todo_id": "t2", "verdict": "accepted"}}
+	reparked := behaviourCall{Tool: "task_review", Args: map[string]any{"todo_id": "t2", "verdict": "parked"}}
+	for _, tc := range []struct {
+		calls []behaviourCall
+		miss  bool
+	}{
+		{[]behaviourCall{first, decided}, false},
+		{[]behaviourCall{first, reparked}, true}, // an illegal fifth park passes no check
+		{[]behaviourCall{first}, true},           // t2 left as is
+	} {
+		if got := parked.misses(tc.calls); (len(got) > 0) != tc.miss {
+			t.Errorf("%v: misses %v", tc.calls, got)
+		}
+	}
 }
 
 func (m behaviourMatch) matches(c behaviourCall) bool {
@@ -303,10 +329,12 @@ func TestSupervisionBehaviourLive(t *testing.T) {
 		results[ci] = make([]outcome, runs)
 		system, event := behaviourGolden(t, c.System), behaviourGolden(t, c.Event)
 		for r := range runs {
+			// Take the slot before launching, so PERSONA_LIVE_PARALLEL bounds goroutines and
+			// their memory, not only the model calls they end up making.
+			slots <- struct{}{}
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				slots <- struct{}{}
 				defer func() { <-slots }()
 				calls, usage, err := runBehaviour(cfg, system, event, tools, c.Results)
 				miss := c.misses(calls)
