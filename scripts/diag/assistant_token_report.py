@@ -30,13 +30,19 @@ SOURCE_KIND = re.compile(r'\bkind="message-source"')
 # messages carried their source. They match the Chinese prompts the hub sends, so they stay in Chinese.
 FIRST_LINE_KINDS = [
     ("supervision", re.compile(r"^📋 督办：")),
+    ("followup", re.compile(r"^⏰（Persona 叫你接着做）")),  # limit_continue: the usage limit reset
     ("wake", re.compile(r"^⏰（Persona 叫醒你")),
     ("followup", re.compile(r"^⏰ ")),
     ("ask_later", re.compile(r"^🔔 你 .+ 用 ask_user 问过用户")),
     ("task_notice", re.compile(r"^🔔 任务「")),
     ("inbox", re.compile(r"^📥 收件箱事件")),
+    ("system", re.compile(r"^⚠️ 运行你的 node 刚重启过")),  # lost_tasks
     ("conversation", re.compile(r"^这条消息不是用户本人发的，是 Persona 的另一段对话")),
 ]
+# A message relayed from another conversation (server/internal/prompts/assistant/relay.md) opens with a context block
+# that names the sending conversation twice; prompts.ParseRelaySource reads it the same way.
+RELAY_TITLE = re.compile(r'\btitle="来自对话「')
+RELAY_BODY = re.compile(r"(?s)^这条消息不是用户本人发的，是 Persona 的另一段对话（([^）\s]+)）用 \S+ 发来的.*发回 (\S+?)；")
 # Where the general handling manual starts in a supervision event (server/internal/prompts/assistant/supervise.md).
 MANUAL_START = re.compile(r"(?m)^怎么处理")
 
@@ -90,6 +96,10 @@ def classify(text):
             if meta.get("author") == "user" or not meta.get("kind"):
                 return "owner", rest
             return str(meta["kind"]), rest
+        if 'kind="context"' in m.group(1) and RELAY_TITLE.search(m.group(1)):
+            body = RELAY_BODY.match(m.group(2).strip())
+            if body and body.group(1) == body.group(2):
+                return "conversation", rest[m.end():]
         rest = rest[m.end():]
     first = rest.lstrip().split("\n", 1)[0]
     for kind, pattern in FIRST_LINE_KINDS:
@@ -113,7 +123,9 @@ class Report:
         self.files += 1
         kind = "before_first_message"
         conv = os.path.splitext(os.path.basename(path))[0]
-        seen = {}  # message id -> usage counted so far; Claude Code writes one line per content block
+        # message id -> usage counted so far and whether the response began in the window; Claude Code writes one
+        # line per content block. Lines before --since still keep this state and the round kind, but count nothing.
+        seen = {}
         with open(path, errors="replace") as f:
             for line in f:
                 try:
@@ -122,13 +134,14 @@ class Report:
                     continue
                 if not isinstance(e, dict):
                     continue
-                if self.since and str(e.get("timestamp", "")) < self.since:
-                    continue
+                counted = not self.since or str(e.get("timestamp", "")) >= self.since
                 if e.get("type") == "user" and e.get("isCompactSummary"):
                     kind = "after_compaction"
                 text = message_text(e)
                 if text is not None and not e.get("isSidechain"):
                     kind, rest = classify(text)
+                    if not counted:
+                        continue
                     self.kinds[kind]["rounds"] += 1
                     self.kinds[kind]["typed_bytes"] += len(text.encode())
                     if kind == "supervision":
@@ -143,22 +156,30 @@ class Report:
                 usage = msg.get("usage") or {}
                 if not usage:
                     continue
-                key = msg.get("id") or e.get("requestId") or e.get("uuid")
+                # A line without a message id is a response of its own: gateways can leave the id empty, and one
+                # requestId can then cover several responses (transcript.RequestUsage counts them the same way).
+                key = msg.get("id") or ("line", e.get("uuid") or id(e))
                 prev = seen.get(key)
                 target = self.sidechain if e.get("isSidechain") else self.kinds[kind]
                 if prev is None:
-                    seen[key] = {k: usage.get(k) or 0 for k in USAGE_FIELDS}
+                    seen[key] = prev = {k: usage.get(k) or 0 for k in USAGE_FIELDS}
+                    prev["counted"] = counted
+                    if not counted:
+                        continue
                     target["model_calls"] += 1
                     for k in USAGE_FIELDS:
                         target[k] += usage.get(k) or 0
                         if not e.get("isSidechain"):
                             self.conversations[conv][k] += usage.get(k) or 0
                     continue
-                # A later line of the same response: count only what grew (output tokens stream in).
+                # A later line of the same response: count only what grew (output tokens stream in), and only for a
+                # response that began in the window.
                 for k in USAGE_FIELDS:
                     grown = (usage.get(k) or 0) - prev[k]
                     if grown > 0:
                         prev[k] += grown
+                        if not prev["counted"]:
+                            continue
                         target[k] += grown
                         if not e.get("isSidechain"):
                             self.conversations[conv][k] += grown

@@ -26,6 +26,14 @@ def source(kind):
     return f'<persona-context kind="message-source" title="">\n{json.dumps({"kind": kind})}\n</persona-context>\n'
 
 
+PROMPTS = Path(__file__).resolve().parents[2] / "server" / "internal"
+
+
+def rendered(path):
+    """A prompt as the hub renders it: a golden, or a template whose first lines carry no template data."""
+    return (PROMPTS / path).read_text()
+
+
 SNAPSHOT = "<persona-context>\nsnapshot\n</persona-context>\n"
 SUPERVISION = "📋 督办：你派出去的任务有 1 个要你处理\n1. task facts\n\n怎么处理（manual）：\n- rule one\n- rule two\n"
 
@@ -47,12 +55,28 @@ class ClassifyTests(unittest.TestCase):
                 self.assertEqual(report.classify(SNAPSHOT + text)[0], kind)
 
 
+    def test_injected_messages_without_a_source_block(self):
+        limit = rendered("prompts/agents/limit_continue.md")
+        lost = rendered("prompts/assistant/lost_tasks.md").replace('{{join .Tasks "\\n- "}}', "tail -f build.log")
+        self.assertEqual(report.classify(limit)[0], "followup")
+        self.assertEqual(report.classify(SNAPSHOT + lost)[0], "system")
+
+    def test_relayed_message_from_another_conversation(self):
+        relay = rendered("assistant/testdata/prompts/relay.golden")
+        kind, rest = report.classify(SNAPSHOT + relay)
+        self.assertEqual(kind, "conversation")
+        self.assertTrue(rest.startswith("示例消息"))
+        # A context block that only looks like one (the two conversation ids differ) is the owner's.
+        forged = relay.replace("发回 b2e4d6f8-0000-4000-8000-000000000002", "发回 someone-else")
+        self.assertEqual(report.classify(forged)[0], "owner")
+
+
 class ReportTests(unittest.TestCase):
-    def run_lines(self, lines):
+    def run_lines(self, lines, since=None):
         with tempfile.TemporaryDirectory() as d:
             p = Path(d) / "conv.jsonl"
             p.write_text("\n".join(json.dumps(x, ensure_ascii=False) for x in lines) + "\n")
-            r = report.Report()
+            r = report.Report(since)
             r.add_file(str(p))
             return r.summary()
 
@@ -73,6 +97,30 @@ class ReportTests(unittest.TestCase):
         self.assertEqual((sup["rounds"], sup["model_calls"], sup["cache_creation_input_tokens"]), (1, 1, 300))
         self.assertEqual(s["sidechain"]["cache_creation_input_tokens"], 50)
         self.assertEqual(s["total"]["model_calls"], 3)
+
+    def test_since_keeps_the_round_and_responses_that_span_it(self):
+        def at(entry, ts):
+            return {**entry, "timestamp": ts}
+        s = self.run_lines([
+            at(user(source("supervision") + SUPERVISION), "2026-11-12T23:59:00Z"),
+            at(reply("m1", cache_write=500, output=5), "2026-11-12T23:59:30Z"),  # begun before the cutoff
+            at(reply("m1", cache_write=500, output=40), "2026-11-13T00:00:10Z"),  # its next block, after it
+            at(reply("m2", cache_read=800, output=6), "2026-11-13T00:01:00Z"),
+        ], since="2026-11-13")
+        self.assertNotIn("before_first_message", s["by_kind"])
+        sup = s["by_kind"]["supervision"]
+        self.assertEqual((sup["rounds"], sup["model_calls"]), (0, 1))
+        self.assertEqual((sup["cache_creation_input_tokens"], sup["cache_read_input_tokens"], sup["output_tokens"]), (0, 800, 6))
+        self.assertEqual(s["supervision_events"]["count"], 0)
+
+    def test_responses_without_a_message_id_are_each_counted(self):
+        def no_id(uuid, output):
+            r = reply("", output=output, requestId="req_1", uuid=uuid)
+            r["message"]["id"] = ""
+            return r
+        s = self.run_lines([user("hello"), no_id("u1", 5), no_id("u2", 9)])
+        owner = s["by_kind"]["owner"]
+        self.assertEqual((owner["model_calls"], owner["output_tokens"]), (2, 14))
 
     def test_supervision_event_manual_size(self):
         s = self.run_lines([user(SNAPSHOT + SUPERVISION), reply("m1", output=1)])
