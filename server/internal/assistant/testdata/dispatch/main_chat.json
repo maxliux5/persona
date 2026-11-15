@@ -1,5 +1,5 @@
 {
-  "about": "Behaviour checks for the main-chat dispatch decision (#4829, docs/assistant/unified-entry.md Dispatch): what the assistant does with one user message. Synthetic cases only. tasks: what task_plan should carry (empty: no task). start: how those tasks start per the hub's own rule (auto: every task read-only or user-requested; card: something waits for Start; none: no tasks). asks_user: an ask_user to the owner instead of a guess. direct_tools_any: instant-tier tool prefixes, any of which passes.",
+  "about": "Behaviour checks for the main-chat dispatch decision (#4829, docs/assistant/unified-entry.md Dispatch): what the assistant does with one user message. Synthetic cases only. tasks: what task_plan should carry (empty: no task). start: how those tasks start per the hub's own rule (planStartsAtOnceRule) — auto: every task read-only, or user-requested while start_requested_tasks is on, or of a kind trusted_kinds marks; card: something waits for Start; none: no tasks. start_requested_tasks (default on) and trusted_kinds carry the start rule's world, so a case can exercise a setting or trust change. asks_user: an ask_user to the owner instead of a guess. direct_tools_any: instant-tier tool prefixes, any of which passes.",
   "scenarios": [
     {
       "name": "instant-reminder",
@@ -65,6 +65,34 @@
           {"title": "清理错别字", "machine": "mac", "dir": "~/code/app", "permission": "default", "user_requested": true}
         ],
         "start": "auto",
+        "asks_user": false,
+        "direct_tools_any": []
+      }
+    },
+    {
+      "name": "trusted-writable-autostart",
+      "title": "已信任目录的可写任务直接开",
+      "message": "我想让首页的接口超时从 5 秒调到 8 秒，你排一下",
+      "machines": [{"id": "mac", "note": "近期在 ~/code/app 有 Agent 活动"}],
+      "projects": [{"name": "app", "dir": "~/code/app"}],
+      "trusted_kinds": [{"machine": "mac", "dir": "~/code/app", "kind": "edit"}],
+      "expect": {
+        "tasks": [{"title": "调大首页接口超时", "machine": "mac", "dir": "~/code/app", "permission": "default", "user_requested": false}],
+        "start": "auto",
+        "asks_user": false,
+        "direct_tools_any": []
+      }
+    },
+    {
+      "name": "start-requested-off-waits",
+      "title": "关掉 start_requested_tasks 后明说的任务也等 Start",
+      "message": "开个 Agent，把 README 里指向旧域名 example.org 的链接直接修了",
+      "start_requested_tasks": false,
+      "machines": [{"id": "mac", "note": "近期在 ~/code/app 有 Agent 活动"}],
+      "projects": [{"name": "app", "dir": "~/code/app"}],
+      "expect": {
+        "tasks": [{"title": "修 README 旧域名链接", "machine": "mac", "dir": "~/code/app", "permission": "default", "user_requested": true}],
+        "start": "card",
         "asks_user": false,
         "direct_tools_any": []
       }

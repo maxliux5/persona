@@ -44,6 +44,14 @@ type dispatchEvalExpect struct {
 	DirectToolsAny []string       `json:"direct_tools_any"` // instant-tier tool prefixes, any of which passes
 }
 
+// dispatchEvalTrustedKind is a (machine, dir, read/edit) kind the case's world lets start without asking
+// (tasks.trust).
+type dispatchEvalTrustedKind struct {
+	Machine string `json:"machine"`
+	Dir     string `json:"dir"`
+	Kind    string `json:"kind"` // read | edit
+}
+
 type dispatchEvalMachine struct {
 	ID   string `json:"id"`
 	Note string `json:"note"`
@@ -60,8 +68,23 @@ type dispatchEvalScenario struct {
 	Message  string            `json:"message"`
 	Machines []dispatchEvalMachine `json:"machines"`
 	Projects []dispatchEvalProject `json:"projects"`
-	Known    string            `json:"known"`
-	Expect   dispatchEvalExpect    `json:"expect"`
+	// StartRequestedTasks is the case's start_requested_tasks; nil means the hub default (on). TrustedKinds is the
+	// case's tasks.trust set. Both carry the start rule's world, so a case can exercise a setting or trust change.
+	StartRequestedTasks *bool                     `json:"start_requested_tasks"`
+	TrustedKinds        []dispatchEvalTrustedKind `json:"trusted_kinds"`
+	Known               string                    `json:"known"`
+	Expect              dispatchEvalExpect        `json:"expect"`
+}
+
+// startWorld is the case's start-rule world: whether tasks the user asked for start without "Start"
+// (start_requested_tasks, on by default) and the (machine, dir, read/edit) kinds trusted to start without asking.
+func (sc dispatchEvalScenario) startWorld() (requested bool, trusted map[string]bool) {
+	requested = sc.StartRequestedTasks == nil || *sc.StartRequestedTasks
+	trusted = map[string]bool{}
+	for _, k := range sc.TrustedKinds {
+		trusted[trustKey(PlanTask{Machine: k.Machine, Cwd: k.Dir, Readonly: strings.EqualFold(k.Kind, "read")})] = true
+	}
+	return requested, trusted
 }
 
 // dispatchEvalDecision is what the model answers (prompts/assistant/dispatch_eval.md).
@@ -72,19 +95,28 @@ type dispatchEvalDecision struct {
 	Reply       string         `json:"reply"`
 }
 
-// dispatchStartOf applies the hub's own start rule (docs/assistant/unified-entry.md "Dispatch"): a plan starts
-// without the card when every task is read-only (permission plan) or the user asked for it in so many words; a plan
-// with anything else waits for the user's "Start".
-func dispatchStartOf(tasks []dispatchEvalTask) string {
+// dispatchStartOf applies the hub's own start rule through the same policy contract production uses
+// (planStartsAtOnceRule, tasks.go): a plan starts without the card only when every task is read-only (permission
+// plan), or was asked for in this turn while start_requested_tasks is on, or is a kind (machine, dir, read/edit) the
+// user trusted to start without asking; a plan with anything else waits for the user's "Start". The case carries the
+// world (startWorld).
+func dispatchStartOf(tasks []dispatchEvalTask, requested bool, trusted map[string]bool) string {
 	if len(tasks) == 0 {
 		return "none"
 	}
-	for _, t := range tasks {
-		if strings.ToLower(t.Permission) != "plan" && !t.UserRequested {
-			return "card"
+	plan := make([]PlanTask, len(tasks))
+	for i, t := range tasks {
+		plan[i] = PlanTask{
+			Machine:       t.Machine,
+			Cwd:           t.Dir,
+			Readonly:      strings.ToLower(t.Permission) == "plan",
+			UserRequested: t.UserRequested,
 		}
 	}
-	return "auto"
+	if planStartsAtOnceRule(plan, trusted, requested) {
+		return "auto"
+	}
+	return "card"
 }
 
 func loadDispatchScenarios(t *testing.T) []dispatchEvalScenario {
@@ -145,8 +177,22 @@ func TestDispatchScenariosAreWellFormed(t *testing.T) {
 				t.Errorf("%s: task permission %q is not one this check gives (plan, default)", sc.Name, task.Permission)
 			}
 		}
-		if got := dispatchStartOf(sc.Expect.Tasks); got != sc.Expect.Start {
-			t.Errorf("%s: start %q, but the hub's rule derives %q from these tasks", sc.Name, sc.Expect.Start, got)
+		for _, k := range sc.TrustedKinds {
+			if !machines[k.Machine] {
+				t.Errorf("%s: trusted kind machine %q is not one of the world's machines", sc.Name, k.Machine)
+			}
+			if len(sc.Projects) > 0 && !dirs[k.Dir] {
+				t.Errorf("%s: trusted kind dir %q is not one of the world's project dirs", sc.Name, k.Dir)
+			}
+			switch strings.ToLower(k.Kind) {
+			case "read", "edit":
+			default:
+				t.Errorf("%s: trusted kind %q is not one this check gives (read, edit)", sc.Name, k.Kind)
+			}
+		}
+		requested, trusted := sc.startWorld()
+		if got := dispatchStartOf(sc.Expect.Tasks, requested, trusted); got != sc.Expect.Start {
+			t.Errorf("%s: start %q, but the hub's rule derives %q from these tasks in this world", sc.Name, sc.Expect.Start, got)
 		}
 		if sc.Expect.AsksUser && len(sc.Expect.Tasks) > 0 {
 			t.Errorf("%s: asks_user but also plans %d tasks", sc.Name, len(sc.Expect.Tasks))
@@ -239,7 +285,8 @@ func (sc dispatchEvalScenario) mismatch(d dispatchEvalDecision) string {
 			remaining = slices.Delete(remaining, i, i+1)
 		}
 	}
-	if got := dispatchStartOf(d.Tasks); got != sc.Expect.Start {
+	requested, trusted := sc.startWorld()
+	if got := dispatchStartOf(d.Tasks, requested, trusted); got != sc.Expect.Start {
 		miss = append(miss, fmt.Sprintf("start %s, want %s", got, sc.Expect.Start))
 	}
 	if d.AsksUser != sc.Expect.AsksUser {
@@ -266,11 +313,12 @@ func runDispatchLive(t *testing.T, m jsonModel, model string) {
 	var rows []string
 	expected, failed := 0, 0
 	for _, sc := range loadDispatchScenarios(t) {
+		requested, trusted := sc.startWorld()
 		ctx, cancel := context.WithTimeout(context.Background(), dispatchEvalTimeout)
 		start := time.Now()
 		d, err := sc.decide(ctx, m)
 		cancel()
-		got := fmt.Sprintf("%dt/%s/ask=%v/tools=%v", len(d.Tasks), dispatchStartOf(d.Tasks), d.AsksUser, d.DirectTools)
+		got := fmt.Sprintf("%dt/%s/ask=%v/tools=%v", len(d.Tasks), dispatchStartOf(d.Tasks, requested, trusted), d.AsksUser, d.DirectTools)
 		miss := sc.mismatch(d)
 		if err != nil {
 			miss = "error: " + err.Error()

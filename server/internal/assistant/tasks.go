@@ -527,8 +527,14 @@ func (s *Service) feedPlans(ctx context.Context, items []FeedItem) map[string]*T
 // planStartsAtOnce: every task only reads, was asked for by the user in this turn (while start_requested_tasks is on),
 // or is a kind the user said to start without asking.
 func (s *Service) planStartsAtOnce(ctx context.Context, tasks []PlanTask) bool {
-	trusted := s.trustedKinds(ctx)
-	requested := s.startRequestedTasks(ctx)
+	return planStartsAtOnceRule(tasks, s.trustedKinds(ctx), s.startRequestedTasks(ctx))
+}
+
+// planStartsAtOnceRule is the start rule itself, with the world as arguments so the dispatch behaviour checker
+// (#4829) can derive a case's start through the same contract production uses: the plan starts at once only when
+// every task is read-only, or was asked for by the user in this turn while start_requested_tasks is on, or is a kind
+// (machine, cwd, read/edit) the user said to start without asking.
+func planStartsAtOnceRule(tasks []PlanTask, trusted map[string]bool, requested bool) bool {
 	for _, t := range tasks {
 		if !t.Readonly && !(requested && t.UserRequested) && !trusted[trustKey(t)] {
 			return false
