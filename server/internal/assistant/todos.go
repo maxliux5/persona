@@ -113,6 +113,8 @@ type Todo struct {
 	// SeenAt: when the owner last looked at it in Just finished, by Got it or by opening it (#5707, todo_seen.go); a to-do
 	// seen since it got there is filed under Done (todo_triage.go). Absent when never seen.
 	SeenAt *time.Time `json:"seen_at,omitempty"`
+	// InboxItem is the Inbox row it was made from (#6480); the to-do's page opens that row. Empty for any other to-do.
+	InboxItem string `json:"inbox_item,omitempty"`
 	// Brief: what was asked when the work was handed out, with its log, and Lineage: the to-dos that carried the work
 	// (#3822, task_brief.go). Filled in where the apps read the to-dos (withBrief); absent for a to-do with no brief.
 	Brief   *TaskBrief    `json:"brief,omitempty"`
@@ -1787,8 +1789,8 @@ func (s *Service) reopenFailedTodo(ctx context.Context, id string) (Todo, bool, 
 
 // TodoHandoff: an agent is handed work for todo h.TodoID (assistant.todo_handoff, POST /api/v1/sessions or
 // …/messages with todo_id): the todo as it is, whether the hand-off may go (no such todo: 404, a done one: 409, the
-// words the hub answers with), and the text with the todo's decisions in effect before it (#1618) and, for a new
-// agent, its project's background before those (#2820); a blank text stays as it is.
+// words the hub answers with), and the text with the todo's and its actual continuation ancestors' decisions in
+// effect before it (#1618) and, for a new agent, its project's background before those (#2820); a blank text stays as it is.
 func (s *Service) TodoHandoff(ctx context.Context, h TodoHandoff) (TodoHandoffResult, error) {
 	t, ok, err := s.todo(ctx, h.TodoID)
 	if err != nil {
